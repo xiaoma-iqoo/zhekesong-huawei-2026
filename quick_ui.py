@@ -119,7 +119,9 @@ def pack_bundle(results: dict | None) -> str | None:
                 source = Path(str(item.get("path", "")))
                 if not source.is_file():
                     continue
-                name = f"{index:02d}_{re.sub(r'[\\\\/:*?\"<>|]', '_', source.name)}"
+                invalid = set('"*/:<>?|') | {chr(92)}
+                safe_name = "".join("_" if ch in invalid else ch for ch in source.name)
+                name = f"{index:02d}_{safe_name}"
                 bundle.write(source, f"{folder}/{name}")
                 detail = " ".join(part for part in (item.get("title", ""), item.get("placement", ""),
                                                     item.get("source_url", "")) if part)
