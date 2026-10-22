@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 import gradio as gr
 from visual_theme import DESKTOP_HTML, DESKTOP_CSS, DESKTOP_JS
 
-APP_TITLE = "知衡 · 华为生态图文营销智能体"
+APP_TITLE = "知衡 · 华为PC图文营销智能体"
 PLATFORMS = ["小红书", "微信公众号", "门店朋友圈", "门店海报"]
 SCENARIOS = ["开学季", "职场办公", "内容创作", "家庭换新", "企业采购", "门店到访", "新品首发", "节日营销"]
 GOALS = ["种草了解", "选购决策", "到店体验", "企业咨询"]
@@ -23,9 +23,6 @@ FALLBACK_PRODUCTS = [
     "HUAWEI MateBook Pro S",
     "HUAWEI MateBook 14 酷睿 Ultra",
     "HUAWEI MateBook D 16 2024",
-    "HUAWEI Mate 70 Pro",
-    "HUAWEI MatePad Pro 13.2",
-    "HUAWEI WATCH 5",
 ]
 
 EXAMPLES = [
@@ -456,4 +453,14 @@ demo = build_demo()
 demo.queue(default_concurrency_limit=1, max_size=8, api_open=False)
 
 if __name__ == "__main__":
-    demo.launch(theme=THEME, css=CSS + DESKTOP_CSS, js=DESKTOP_JS, max_threads=2, show_error=False)
+    import os
+
+    # 部署到魔搭创空间时没有本地知识库目录，快发模式的配图从私有归档 ZIP 解到
+    # 系统临时目录；Gradio 需要显式放行该目录才能把图片喂给 Gallery。
+    from facts import ARCHIVE_IMAGE_ROOT
+
+    # 创空间要求监听 0.0.0.0:7860；本地仍可用 GRADIO_SERVER_PORT 指定端口。
+    demo.launch(theme=THEME, css=CSS + DESKTOP_CSS, js=DESKTOP_JS, max_threads=2, show_error=False,
+                server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
+                allowed_paths=[str(ARCHIVE_IMAGE_ROOT)],
+                favicon_path=str(Path(__file__).resolve().parent / "assets" / "zh-mark-tile-256.png"))

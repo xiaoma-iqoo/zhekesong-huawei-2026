@@ -29,7 +29,13 @@ _DEFAULT_KB = ""
 _URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+", re.I)
 _FORBIDDEN = re.compile(r"竞品|对比|历史归档|待审核|MacBook|ThinkPad|联想|惠普|戴尔", re.I)
 _SIGNED = re.compile(r"sign|signature|token|credential|authorization|expires|secret|api.?key", re.I)
-_MODEL = re.compile(r"(?:HUAWEI\s+)?MateBook\b|(?:华为)?擎云\s*[A-Za-z]\d", re.I)
+_MODEL = re.compile(
+    r"(?:HUAWEI\s+)?MateBook\b|(?:华为)?擎云\s*[A-Za-z]\d"
+    r"|^(?:HUAWEI|华为|畅享|nova\b|WATCH\b|FreeBuds|FreeArc|FreeClip|MatePad\b|智慧屏|Vision\b"
+    r"|MateView\b|Smart\b|Sound\b|PixLab\b|Eyewear\b|Band\s*\d|手环|路由|Router\b|门锁)",
+    re.I)
+# P1 subfolders that index material instead of holding model folders.
+_INDEX_CATEGORY = re.compile(r"型号检索卡|扩展产品目录|官方公开价格快照|全库横向索引")
 
 
 def _normal(value: str) -> str:
@@ -84,10 +90,12 @@ class IMAClient:
 
     _asset_lock = threading.RLock()
 
-    def __init__(self, *, timeout: float = 25, cache_ttl: float = 300):
-        self._client_id = os.environ.get("IMA_OPENAPI_CLIENTID", "").strip()
-        self._api_key = os.environ.get("IMA_OPENAPI_APIKEY", "").strip()
-        self.kb_name = os.environ.get("IMA_KB_NAME", "").strip()
+    def __init__(self, *, timeout: float = 25, cache_ttl: float = 300,
+                 client_id: str | None = None, api_key: str | None = None, kb_name: str | None = None):
+        # Explicit values come from a user's per-session settings; otherwise use server env.
+        self._client_id = (os.environ.get("IMA_OPENAPI_CLIENTID", "") if client_id is None else client_id).strip()
+        self._api_key = (os.environ.get("IMA_OPENAPI_APIKEY", "") if api_key is None else api_key).strip()
+        self.kb_name = (os.environ.get("IMA_KB_NAME", "") if kb_name is None else kb_name).strip()
         self.timeout = timeout
         self.cache_ttl = cache_ttl
         self._kb = None
@@ -193,9 +201,13 @@ class IMAClient:
         status = {"connected": False, "kb_name": self.kb_name, "account_label": f"ClientID …{tail} · {role}",
                   "role": role, "content_count": 0, "message": "", "retrieval_mode": "live_ima", "offline_archive": False}
         if self._offline_archive:
+            status["workspace_authorized"] = getattr(self, "_workspace_authorized", False)
             status.update(role="本地只读归档", content_count=len(self._archive_members),
                           account_label=f"ClientID …{tail} · 本地只读归档", retrieval_mode="offline_archive", offline_archive=True,
                           message="已加载获授权的本地 ZIP 归档；非 ima 实时资料，日期与版本以原文为准。")
+            if status["workspace_authorized"]:
+                status.update(kb_name="工作区授权知识库", account_label="工作区授权知识库 · 本地只读",
+                              message="工作区授权知识库已加载 · 本地只读 · 非实时 ima；日期与版本以原文为准。")
             return status
         try:
             kb = self._resolve_kb()
@@ -262,7 +274,7 @@ class IMAClient:
         names: list[str] = []
         for category in categories:
             title = category["title"]
-            if re.match(r"0[123]-", title):
+            if not _INDEX_CATEGORY.search(title):
                 for entry in self._children(category):
                     if _folder(entry) and _MODEL.search(entry["title"]):
                         self._primary.append(entry)
@@ -361,7 +373,7 @@ class IMAClient:
             raise IMAError("ima 资源下载失败，请检查网络后重新检索。") from None
 
     def load_archive(self, path: str | os.PathLike) -> dict:
-        """Explicitly switch this instance to an authorized local ZIP, never the default."""
+        """Switch this instance to an authorized local ZIP; never a live-error fallback."""
         archive = Path(path).expanduser().resolve()
         lists: dict[str, list[dict]] = {"": []}
         members, nodes = {}, set()
@@ -636,7 +648,8 @@ class IMAClient:
         origins = {x.get("origin", "live_ima") for x in sources + images}
         mode = "offline_archive" if self._offline_archive else next(iter(origins)) if len(origins) == 1 else "mixed" if origins else "live_ima"
         if self._offline_archive:
-            warnings.append("本次使用获授权的主办方本地 ZIP 归档缓存，并非 ima 实时获取；retrieved_at 是本地读取时间，资料快照日期与配置边界以原文为准。")
+            label = "工作区授权知识库（本地只读）" if getattr(self, "_workspace_authorized", False) else "获授权的主办方本地 ZIP 归档缓存"
+            warnings.append(f"本次使用{label}，非实时 ima 获取；retrieved_at 是本地读取时间，资料快照日期与配置边界以原文为准。")
         if "ima_cache" in origins:
             warnings.append("部分资料来自系统临时 ima 缓存；retrieved_at 保留首次真实获取时间，并非本次实时更新。")
         if self._quota_message:
