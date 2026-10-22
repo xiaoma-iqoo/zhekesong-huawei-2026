@@ -15,9 +15,9 @@ license: apache-2.0
 浙客松 2026 · AI+X · 华为产业进阶赛道｜赛题：**AI+华为PC营销软文智能体**  
 团队：**能工智人队**。团队独立开发，非华为官方产品。
 
-- [GitHub 源码](https://github.com/1461164308-bot/zhekesong-huawei-2026)
-- [ModelScope 创空间](https://www.modelscope.cn/studios/xiongtianyu1010/huawei-we-know)
-- [直接打开应用](https://xiongtianyu1010-huawei-we-know.ms.show)
+- [GitHub 源码](https://github.com/xiaoma-iqoo/zhekesong-huawei-2026)
+- [ModelScope 创空间](https://www.modelscope.cn/studios/xiaoma2008/zhekesong-huawei-2026)
+- [直接打开应用](https://xiaoma2008-zhekesong-huawei-2026.ms.show)
 
 本地新版首页先选择 **极简模式 / 专业模式**：鼠标悬停或键盘聚焦卡片时浮现介绍，触屏设备直接显示介绍；切换模式保留各自已填写内容。两种模式均保留液态玻璃界面与实时日期时钟，不自动发布到外部平台。
 
