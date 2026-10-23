@@ -52,7 +52,7 @@ class LLMClient:
     _lock = threading.Lock()
     _calls: dict[str, int] = {}
 
-    def __init__(self, api_config: dict | None = None):
+    def __init__(self, api_config: dict | None = None, model: str | None = None):
         override = resolve_api_config(api_config)
         if override:
             self.key = override["api_key"]
@@ -62,7 +62,11 @@ class LLMClient:
         else:
             self.key = os.environ.get("LLM_API_KEY", "").strip()
             self.base = os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL).strip().rstrip("/")
-            self.model = os.environ.get("LLM_MODEL", DEFAULT_MODEL).strip()
+            # An explicit per-call model override (for example the writing node)
+            # only applies to server-configured deployments, never to a user's
+            # session API settings.
+            selected = str(model or "").strip()
+            self.model = selected or os.environ.get("LLM_MODEL", DEFAULT_MODEL).strip()
             self.custom = False
         self.fallback_models = [m.strip() for m in os.environ.get(
             "LLM_FALLBACK_MODELS", DEFAULT_FALLBACK).split(",") if m.strip()]

@@ -505,10 +505,19 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
             strategy["style_card"] = card
         if approved_plan:
             strategy["approved_plan"] = normalize_plan(approved_plan)
+        writer = model
+        compose_model = os.environ.get("LLM_COMPOSE_MODEL", "").strip()
+        if compose_model and not api_config and not getattr(model, "custom", False):
+            # Server deployments may use a stronger writing model while keeping the
+            # fast default for extraction, evidence review and auditing.
+            try:
+                writer = LLMClient(model=compose_model)
+            except ModelError:
+                writer = model
         compose_payload = {"task": task, "strategy": strategy, "facts": facts,
                            "style_card": card, "approved_plan": strategy.get("approved_plan"),
                            "constraints": extracted.get("constraints", []), "images": image_meta}
-        draft = model.json(COMPOSE_PROMPT, compose_payload)
+        draft = writer.json(COMPOSE_PROMPT, compose_payload)
         # One bounded writing repair, always followed by the same independent audit.
         import re
         body_text = str(draft.get("intro", "")) + str(draft.get("cta", "")) + "".join(
@@ -517,7 +526,9 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         max_chars = {"小红书": 650, "微信公众号": 1000, "门店朋友圈": 180, "门店海报": 120}[platform]
         min_chars = {"小红书": 350, "微信公众号": 650, "门店朋友圈": 80, "门店海报": 40}[platform]
         repair = []
-        if body_chars > max_chars or (phase == "final" and prepared is not None and body_chars < min_chars):
+        repair_short = (phase == "final" and body_chars < min_chars
+                        and (prepared is not None or os.environ.get("LLM_REPAIR_SHORT_BODY", "").strip() == "1"))
+        if body_chars > max_chars or repair_short:
             repair.append(f"正文当前{body_chars}个汉字，调整至{strategy['body_target']}；补足场景建议和选购取舍，不编造事实，不重复凑字。")
         if len(str(draft.get("title", ""))) > strategy["title_max"]:
             repair.append(f"标题控制在{strategy['title_max']}个字符以内。")
@@ -539,8 +550,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         if gate_feedback:
             repair.append("确定性事实门控发现以下文本与该单元引用不一致。仅修改这些单元：删除不支持表述，或补上真正支持数值与单位的fact_ids；不要复述F编号作为文案。\n" + "\n".join(gate_feedback[:8]))
         if repair:
-            draft = model.json(COMPOSE_PROMPT, {**compose_payload, "previous_draft": draft,
-                                               "quality_revision": repair})
+            draft = writer.json(COMPOSE_PROMPT, {**compose_payload, "previous_draft": draft,
+                                                "quality_revision": repair})
         strategy["angle"] = str(draft.get("angle", strategy["pain"]))
         strategy["selected_priorities"] = [str(x) for x in draft.get("priorities", strategy['priorities'])]
         units = draft_units(draft, strategy)
