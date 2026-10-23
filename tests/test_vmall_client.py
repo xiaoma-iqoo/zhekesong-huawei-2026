@@ -1,11 +1,13 @@
 """VMall parser/network regressions: all pages and product IDs are synthetic."""
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
 
-from vmall_client import VmallError, fetch_vmall_sources
+from vmall_client import VmallError, fetch_vmall_product, fetch_vmall_sources
 
 
 PRODUCT = "HUAWEI MateBook Pro S"
@@ -46,6 +48,48 @@ class VmallTests(unittest.TestCase):
         response = Response(body, **kwargs)
         with patch("vmall_client.requests.Session.get", return_value=response):
             return fetch_vmall_sources(PRODUCT, URL)
+
+    def test_product_gallery_images_are_downloaded_with_mall_origin(self):
+        gallery = ('<link rel="preload" as="image" '
+                   'href="https://res.vmallres.com/pimages/a/800_800_A.png">'
+                   '"groupPhotoList":[{"maxSize":3680,"photoName":"B.png","photoPath":"/p/"}],'
+                   '"webpGroupPhotoList":[{"maxSize":3680,"photoName":"B.webp","photoPath":"/p/"}]')
+        product_page = page().replace("</script>", "</script>" + gallery)
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if "res.vmallres.com" in url:
+                if "evil" in url:
+                    return Response("not an image", headers={"Content-Type": "text/plain"})
+                return Response("fake-image-bytes", headers={"Content-Type": "image/png"})
+            return Response(product_page, headers={"Content-Type": "text/html; charset=utf-8"})
+
+        with tempfile.TemporaryDirectory() as tmp, patch("vmall_client.requests.Session.get", side_effect=fake_get):
+            assets = fetch_vmall_product(PRODUCT, URL, image_dir=tmp)
+            self.assertEqual(len(assets["sources"]), 1)
+            self.assertEqual(len(assets["images"]), 2, "preload 与 groupPhotoList 两张同图应去重后保留")
+            for image in assets["images"]:
+                self.assertEqual(image["origin"], "official_vmall")
+                self.assertTrue(Path(image["path"]).is_file())
+                self.assertEqual(image["official_url"], URL)
+                self.assertIn("res.vmallres.com", image["url"])
+            self.assertTrue(any("800_800_A.png" in url for url in calls))
+            self.assertFalse(any(url.endswith(".webp") for url in calls), "优先 PNG，不重复下载 webp")
+
+    def test_non_image_and_unsafe_image_hosts_are_skipped(self):
+        gallery = ('"groupPhotoList":[{"maxSize":3680,"photoName":"C.png","photoPath":"/p/"}],'
+                   '"webpGroupPhotoList":[]')
+        product_page = page().replace("</script>", "</script>" + gallery)
+
+        def fake_get(url, **kwargs):
+            if "res.vmallres.com" in url:
+                return Response("html-not-image", headers={"Content-Type": "text/html"})
+            return Response(product_page, headers={"Content-Type": "text/html; charset=utf-8"})
+
+        with tempfile.TemporaryDirectory() as tmp, patch("vmall_client.requests.Session.get", side_effect=fake_get):
+            assets = fetch_vmall_product(PRODUCT, URL, image_dir=tmp)
+        self.assertEqual(assets["images"], [])
 
     def test_no_explicit_mall_link_never_searches_or_guesses(self):
         self.assertEqual(fetch_vmall_sources(PRODUCT, "请补充官方商城参数。"), [])

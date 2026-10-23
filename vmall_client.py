@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+import hashlib
 import json
+from pathlib import Path
 import re
 import unicodedata
 from urllib.parse import parse_qsl, urljoin, urlsplit
@@ -28,7 +30,7 @@ class VmallError(Exception):
 
 
 _MAX_BYTES = 2 * 1024 * 1024
-_MAX_REDIRECTS = 3
+_MAX_REDIRECTS = 6
 _WARM_UP_URL = "https://www.vmall.com/"
 _UA = "ZhiHeng-PublicSource/1.0"
 _HTML_ACCEPT = "text/html,application/xhtml+xml"
@@ -393,12 +395,84 @@ def _product_ids(text: str) -> list[tuple[str, str]]:
 
 def fetch_vmall_sources(product: str, text: str, *, timeout=20, max_sources=2) -> list[dict]:
     """Fetch only explicit canonical product URLs in user requirements/revisions."""
+    return fetch_vmall_product(product, text, timeout=timeout, max_sources=max_sources)["sources"]
+
+
+_IMAGE_MAX = 6
+_IMAGE_BYTES = 6 * 1024 * 1024
+_IMAGE_HOST_SUFFIX = ".vmallres.com"
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
+_GROUP_PHOTO = re.compile(r'\{"maxSize":\d+,"photoName":"([^"]+)","photoPath":"([^"]+)"\}')
+_PRELOAD_IMAGE = re.compile(r'<link[^>]+rel="preload"[^>]+as="image"[^>]+href="([^"]+)"', re.I)
+
+
+def _page_image_urls(page: str) -> list[str]:
+    """Main-product photo URLs embedded in the VMall product page.
+
+    The gallery lives in ``groupPhotoList`` (PNG) and ``webpGroupPhotoList``;
+    recommendation, review and navigation images are intentionally ignored.
+    """
+    candidates: list[str] = []
+    preload = _PRELOAD_IMAGE.search(page)
+    if preload:
+        candidates.append(preload.group(1))
+    for name, path in _GROUP_PHOTO.findall(page):
+        if name.lower().endswith(".webp") or not path.startswith("/"):
+            continue
+        candidates.append("https://res.vmallres.com/pimages" + path + "800_800_" + name)
+    cleaned: list[str] = []
+    for url in candidates:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        if parts.scheme != "https" or not host.endswith(_IMAGE_HOST_SUFFIX):
+            continue
+        if not parts.path.lower().endswith(_IMAGE_EXT) or url in cleaned:
+            continue
+        cleaned.append(url)
+    return cleaned[:_IMAGE_MAX]
+
+
+def _download_image(session, url: str, dest_dir: Path, timeout: float) -> str:
+    try:
+        response = session.get(url, timeout=(min(6, timeout), timeout), allow_redirects=False, stream=True,
+                               headers={"Accept": "image/*", "User-Agent": _UA})
+    except requests.RequestException:
+        return ""
+    with response:
+        if response.status_code != 200:
+            return ""
+        if not str(response.headers.get("Content-Type", "")).lower().startswith("image/"):
+            return ""
+        declared = str(response.headers.get("Content-Length", ""))
+        if declared.isdigit() and int(declared) > _IMAGE_BYTES:
+            return ""
+        data = bytearray()
+        for chunk in response.iter_content(65536):
+            data.extend(chunk)
+            if len(data) > _IMAGE_BYTES:
+                return ""
+        if not data:
+            return ""
+        suffix = ".webp" if url.lower().endswith(".webp") else ".png"
+        target = dest_dir / ("vmall_" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + suffix)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(bytes(data))
+        return str(target)
+
+
+def fetch_vmall_product(product: str, text: str, *, image_dir=None, timeout=20, max_sources=2,
+                         max_images=_IMAGE_MAX) -> dict:
+    """Fetch the explicit VMall product page: official text facts plus product photos.
+
+    ``image_dir`` enables downloading the same-product gallery photos (official
+    marketing photos) into a local cache so preview/download can serve them.
+    """
     links = _product_ids(text)
     limit = max(0, min(int(max_sources), 2))
     if not links or not limit:
-        return []
+        return {"sources": [], "images": []}
     timeout = max(1.0, min(float(timeout), 40.0))
-    sources = []
+    sources, images = [], []
     # A fresh isolated session neither reads netrc/proxy credentials nor reuses app
     # auth/cookies. Requests are fixed to validated public hosts and manual redirects.
     with requests.Session() as session:
@@ -408,6 +482,20 @@ def fetch_vmall_sources(product: str, text: str, *, timeout=20, max_sources=2) -
             session.cookies.clear()
             content, final_url = _download(session, canonical, prd_id, timeout)
             title, body = _extract(content, str(product), final_url)
+            retrieved_at = datetime.now(timezone.utc).isoformat()
             sources.append({"title": title, "text": body, "kind": "facts", "official_url": final_url,
-                            "retrieved_at": datetime.now(timezone.utc).isoformat(), "origin": "official_vmall"})
-    return sources
+                            "retrieved_at": retrieved_at, "origin": "official_vmall"})
+            if image_dir:
+                dest = Path(image_dir) / "vmall" / str(prd_id)
+                for image_url in _page_image_urls(content):
+                    if len(images) >= max(1, min(int(max_images), _IMAGE_MAX)):
+                        break
+                    path = _download_image(session, image_url, dest, timeout)
+                    if not path:
+                        continue
+                    images.append({"id": f"VM{len(images) + 1}", "title": f"{title[:80]} 官方商城配图 {len(images) + 1}",
+                                   "caption": "华为商城商品页配图（同型号）", "model": str(product),
+                                   "path": path, "origin": "official_vmall",
+                                   "source": "华为官方商城商品页", "source_title": "华为官方商城商品页",
+                                   "url": image_url, "official_url": final_url, "retrieved_at": retrieved_at})
+    return {"sources": sources, "images": images}

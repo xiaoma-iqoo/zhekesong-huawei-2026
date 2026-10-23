@@ -29,7 +29,8 @@ from policy import (PLATFORM_RULES, SCENE_RULES, draft_units, evidence_facts,
 from prompts import EXTRACT_PROMPT, COMPOSE_PROMPT, AUDIT_PROMPT, FACT_REVIEW_PROMPT
 from preview import build_preview
 from public_payload import sanitize_public
-from vmall_client import VmallError, fetch_vmall_sources
+from vmall_client import VmallError, fetch_vmall_product
+from facts import ARCHIVE_IMAGE_ROOT
 from creation_flow import (FlowError, digest, make_plan, normalize_plan, request_key)
 from style_cards import normalize_style
 from platform_delivery import export_delivery
@@ -479,9 +480,12 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
             source_requests = requirements + "\n" + revision
             vmall_only = False
             mall_sources = []
+            mall_images = []
             if not canonical:
-                # 知识库之外的产品：只允许用户明确提供的华为商城商品页作为事实来源。
-                mall_sources = fetch_vmall_sources(product, source_requests)
+                # 知识库之外的产品：只允许用户明确提供的华为商城商品页作为事实来源；
+                # 同页的主商品官方配图可一并读取（用户明确允许从华为商城获取图片）。
+                assets = fetch_vmall_product(product, source_requests, image_dir=ARCHIVE_IMAGE_ROOT)
+                mall_sources, mall_images = assets["sources"], assets["images"]
                 if not mall_sources:
                     detail = "\n".join("- " + q for q in questions) if questions else "- 请先确认产品型号。"
                     return _empty("needs_clarification",
@@ -506,11 +510,16 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                     next_source += 1
                     sources.append(item)
                 mall_sources = sources
-                images = []
+                images = mall_images
                 mode, knowledge_mode = "official_vmall", "official_vmall"
-                mode_label = "华为官方商城本次读取（无授权知识库配图）"
-                result = {"warnings": ["本次仅使用华为商城商品页事实；未取得该型号的授权知识库配图，交付为纯文字草稿。"]}
-                step("资料与配图检索", 0.3, f"华为官方商城：已读取{len(sources)}份商品页正文；该型号暂无授权知识库配图。")
+                if images:
+                    mode_label = "华为官方商城本次读取（含商城同型号配图）"
+                    result = {"warnings": ["本次使用华为商城商品页事实与同型号官方配图；发布前请核对图片可用的渠道与授权范围。"]}
+                    step("资料与配图检索", 0.3, f"华为官方商城：已读取{len(sources)}份商品页正文、{len(images)}张同型号官方配图。")
+                else:
+                    mode_label = "华为官方商城本次读取（无授权知识库配图）"
+                    result = {"warnings": ["本次仅使用华为商城商品页事实；未取得该型号的授权知识库配图，交付为纯文字草稿。"]}
+                    step("资料与配图检索", 0.3, f"华为官方商城：已读取{len(sources)}份商品页正文；该型号暂无授权知识库配图。")
             else:
                 result = _ima().retrieve(product, query=f"{scenario} {audience} {requirements}", max_sources=5,
                                           max_images=strategy["image_max"])
@@ -530,7 +539,9 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                 mode_label = {"live_ima": "实时 ima", "ima_cache": "ima 已检索缓存",
                               "offline_archive": "主办方 ZIP 缓存（非实时 ima）", "mixed": "ima 检索与缓存混合"}[mode]
                 sources = [s.copy() for s in result.get("sources", []) if s.get("text")]
-                mall_sources = fetch_vmall_sources(product, source_requests)
+                marketplace = fetch_vmall_product(product, source_requests, image_dir=ARCHIVE_IMAGE_ROOT)
+                mall_sources = marketplace["sources"]
+                mall_images = marketplace["images"]
                 used_source_ids = {s["id"] for s in sources}
                 next_source = 1
                 for source in mall_sources:
@@ -547,7 +558,10 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                     return _empty("blocked", "### 没有可用的事实依据\n\n未能获取该型号的授权知识库正文或华为官方商城商品正文，本次停止生成。请确认资料权限或提供准确的官方商城商品页链接。", trace)
                 images = [i.copy() for i in result.get("images", []) if normalize(i.get("model", "")) == normalize(product)
                           and _displayable_image(i)]
-                step("资料与配图检索", 0.3, f"{mode_label}：已读取{len(sources)}份型号资料（含{len(mall_sources)}份官方商城正文）、{len(images)}张知识库同型号原图。")
+                if mall_images:
+                    images.extend(mall_images)
+                step("资料与配图检索", 0.3, f"{mode_label}：已读取{len(sources)}份型号资料（含{len(mall_sources)}份官方商城正文）、"
+                                            f"{len(images)}张同型号配图（其中商城配图{len(mall_images)}张）。")
             model = LLMClient(api_config) if api_config else LLMClient()
             # Full per-product facts/limits are supplied; historical marketing/price docs are not trusted facts.
             payload_sources = [{"id": s["id"], "title": s["title"], "kind": s.get("kind", "facts"),

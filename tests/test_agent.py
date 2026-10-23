@@ -152,7 +152,7 @@ class AgentRegressionTests(unittest.TestCase):
         self.assertIsNone(result.get("export_json"))
 
     def test_catalog_miss_without_mall_link_asks_for_explicit_page(self):
-        with patch("agent.get_products", return_value=[PRODUCT]), patch("agent.fetch_vmall_sources", return_value=[]):
+        with patch("agent.get_products", return_value=[PRODUCT]), patch("agent.fetch_vmall_product", return_value={"sources": [], "images": []}):
             result = agent.run_task(product="HUAWEI Mate 70 Pro", audience="职场新人", scenario="职场办公",
                                     platform="门店朋友圈", goal="种草了解")
         self.assertEqual(result["status"], "needs_clarification")
@@ -166,7 +166,7 @@ class AgentRegressionTests(unittest.TestCase):
                 "kind": "facts", "official_url": "https://www.vmall.com/product/123456.html",
                 "retrieved_at": "2026-10-23T05:00:00+00:00", "origin": "official_vmall"}
         with patch("agent.get_products", return_value=[PRODUCT, OTHER]), \
-                patch("agent.fetch_vmall_sources", return_value=[mall]):
+                patch("agent.fetch_vmall_product", return_value={"sources": [mall], "images": []}):
             result = agent.run_task(product="HUAWEI Mate 70 Pro", audience="职场新人", scenario="职场办公",
                                     platform="门店朋友圈", goal="种草了解",
                                     requirements="https://www.vmall.com/product/123456.html")
@@ -180,10 +180,31 @@ class AgentRegressionTests(unittest.TestCase):
         self.assertEqual(self.phases(), ["extract", "fact_review", "compose", "audit"])
         self.assertIn("华为官方商城", result["report"])
 
+    def test_mall_only_product_can_use_official_mall_images(self):
+        mall = {"title": "HUAWEI Mate 70 Pro",
+                "text": "HUAWEI Mate 70 Pro\n【主要参数】操作系统：HarmonyOS 4.3\n" + QUOTE,
+                "kind": "facts", "official_url": "https://www.vmall.com/product/123456.html",
+                "retrieved_at": "2026-10-23T05:00:00+00:00", "origin": "official_vmall"}
+        mall_images = [{"id": f"VM{i}", "title": "HUAWEI Mate 70 Pro 官方商城配图", "caption": "华为商城商品页配图（同型号）",
+                        "model": "HUAWEI Mate 70 Pro", "path": str(self.picture), "origin": "official_vmall",
+                        "source": "华为官方商城商品页", "source_title": "华为官方商城商品页",
+                        "url": "https://res.vmallres.com/pimages/synthetic.png",
+                        "official_url": "https://www.vmall.com/product/123456.html",
+                        "retrieved_at": "2026-10-23T05:00:00+00:00"} for i in range(1, 4)]
+        with patch("agent.get_products", return_value=[PRODUCT, OTHER]), \
+                patch("agent.fetch_vmall_product", return_value={"sources": [mall], "images": mall_images}):
+            result = agent.run_task(product="HUAWEI Mate 70 Pro", audience="职场新人", scenario="职场办公",
+                                    platform="小红书", goal="种草了解",
+                                    requirements="https://www.vmall.com/product/123456.html")
+        self.assertEqual(result["status"], "ready", result.get("report"))
+        self.assertEqual([x["id"] for x in result["images"]], ["VM1", "VM2", "VM3"])
+        self.assertEqual({x["origin"] for x in result["images"]}, {"official_vmall"})
+        self.assertIn("华为官方商城", result["report"])
+
     def test_mall_product_identity_mismatch_asks_before_model(self):
         from vmall_client import VmallError
         with patch("agent.get_products", return_value=[PRODUCT]), \
-                patch("agent.fetch_vmall_sources", side_effect=VmallError("商城当前商品为「HUAWEI Mate 70」，与填写的型号不一致。")):
+                patch("agent.fetch_vmall_product", side_effect=VmallError("商城当前商品为「HUAWEI Mate 70」，与填写的型号不一致。")):
             result = agent.run_task(product="HUAWEI Mate 60 Pro", audience="职场新人", scenario="职场办公",
                                     platform="门店朋友圈", goal="种草了解",
                                     requirements="https://www.vmall.com/product/123456.html")
@@ -654,7 +675,7 @@ class AgentRegressionTests(unittest.TestCase):
                   "official_url": "https://www.vmall.com/product/12345.html",
                   "retrieved_at": "2026-10-18T08:00:00+00:00", "origin": "official_vmall"}
         self.model.extracted["facts"][0]["source_id"] = "S2"
-        with patch("agent.fetch_vmall_sources", return_value=[source]):
+        with patch("agent.fetch_vmall_product", return_value={"sources": [source], "images": []}):
             result = self.run_task(requirements=source["official_url"])
         self.assertEqual(result["status"], "ready", result.get("report"))
         self.assertEqual(result["checks"]["retrieval_mode"], "mixed")
@@ -678,7 +699,7 @@ class AgentRegressionTests(unittest.TestCase):
         source = {"title": PRODUCT + " 官方商城", "text": QUOTE, "kind": "facts",
                   "official_url": "https://www.vmall.com/product/12345.html",
                   "retrieved_at": "2026-10-18T08:00:00+00:00", "origin": "official_vmall"}
-        with patch("agent.fetch_vmall_sources", return_value=[source]):
+        with patch("agent.fetch_vmall_product", return_value={"sources": [source], "images": []}):
             result = self.run_task(requirements=source["official_url"])
         self.assertEqual(result["status"], "ready", result.get("report"))
         self.assertEqual(result["checks"]["retrieval_mode"], "mixed")

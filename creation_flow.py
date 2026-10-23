@@ -118,6 +118,10 @@ def make_plan(context: dict) -> dict:
     selected = context["images"][:strategy["image_min"]]
     image_lines = [f"[{image['id']}] {'封面主视觉' if i == 0 else f'第{i}部分后'}：{image.get('caption') or image.get('title', '')}"
                    for i, image in enumerate(selected)]
+    if not image_lines:
+        # Mall-only products have no authorised image library; the idea must still be
+        # confirmable so the text draft can be generated and reviewed.
+        image_lines = ["本次仅生成文字稿：没有可用的同型号授权配图，发布前请补充门店实拍或官方物料（不使用其他型号或网络图片）。"]
     conditions = list(context.get("extracted", {}).get("constraints", []))
     conditions.extend(condition for fact in facts for condition in fact.get("conditions", []))
     return normalize_plan({

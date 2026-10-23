@@ -325,7 +325,7 @@ class SimpleFlowTests(unittest.TestCase):
         harness = fixtures.AgentRegressionTests('test_valid_pipeline_invokes_separate_fact_review_before_compose')
         harness.setUp()
         try:
-            with patch('agent.fetch_vmall_sources', return_value=[]):
+            with patch('agent.fetch_vmall_product', return_value={"sources": [], "images": []}):
                 out = self.flow.generate_now({}, PRODUCT, '上班族', '门店朋友圈', api_config=API)
             self.assertEqual(out['result']['status'], 'ready', out['result'].get('report'))
             self.assertEqual(harness.phases(), ['extract', 'fact_review', 'compose', 'audit'])
@@ -333,7 +333,7 @@ class SimpleFlowTests(unittest.TestCase):
             self.model.json.assert_not_called()
             harness.model.calls.clear()
             harness.ima.result['images'] = []
-            with patch('agent.fetch_vmall_sources', return_value=[]):
+            with patch('agent.fetch_vmall_product', return_value={"sources": [], "images": []}):
                 degraded = self.flow.generate_now({}, PRODUCT, '上班族', '门店朋友圈', api_config=API)
             self.assertEqual(degraded['result']['status'], 'ready', degraded['result'].get('report'))
             self.assertFalse(degraded['result']['checks']['platform_ready'], '没有配图时必须按草稿交付')
