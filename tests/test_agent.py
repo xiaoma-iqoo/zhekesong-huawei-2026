@@ -191,20 +191,14 @@ class AgentRegressionTests(unittest.TestCase):
         self.assertIn("华为官方商城", result["report"])
         self.assertEqual(self.phases(), [])
 
-        self.picture.write_bytes(self.picture.read_bytes()[:40])
-        result = self.run_task()
-        self.assert_not_published(result, "needs_clarification")
-        self.assertIn("配图", result["report"])
-        self.assertEqual(self.phases(), [])
-        self.model_factory.assert_not_called()
-
-    def test_preview_without_embedded_images_cannot_be_delivered_ready(self):
+    def test_preview_without_embedded_images_degrades_to_draft(self):
         for empty_preview in ("", "<article>Only text, no verified image</article>"):
             with self.subTest(preview=empty_preview):
                 with patch("agent.build_preview", return_value=empty_preview):
                     result = self.run_task()
-                self.assert_not_published(result, "needs_clarification")
-                self.assertIn("预览", result["report"])
+                self.assertEqual(result["status"], "ready", result.get("report"))
+                self.assertFalse(result["checks"]["platform_ready"])
+                self.assertIn("配图", " ".join(result["checks"]["warnings"]))
 
     def test_unknown_and_contradictory_source_modes_block_before_model(self):
         baseline = copy.deepcopy(self.ima.result)
@@ -616,10 +610,26 @@ class AgentRegressionTests(unittest.TestCase):
     def test_no_verified_images_never_triggers_external_fallback(self):
         self.ima.result["images"] = []
         result = self.run_task()
-        self.assert_not_published(result, "needs_clarification")
+        self.assertEqual(result["status"], "ready", result.get("report"))
+        self.assertFalse(result["checks"]["platform_ready"], "没有配图时必须按草稿交付")
         self.assertEqual(result["images"], [])
-        self.assertIn("配图", result["report"])
-        self.assertIn("没有使用其他型号", result["report"])
+        warnings = " ".join(result["checks"]["warnings"])
+        self.assertIn("配图", warnings)
+        self.assertIn("未使用其他型号", warnings)
+
+    def test_two_verified_images_still_generate_xhs_draft_with_warning(self):
+        second = copy.deepcopy(self.ima.result["images"][0])
+        second.update(id="I2", title="Synthetic second image")
+        self.ima.result["images"].append(second)
+        self.model.draft["image_plan"].append({"image_id": "I2", "placement": "第二段后", "slot": 2,
+                                               "caption": "合成第二张"})
+        result = self.run_task(platform="小红书")
+        self.assertEqual(result["status"], "ready", result.get("report"))
+        self.assertFalse(result["checks"]["platform_ready"], "配图不足时必须按草稿交付")
+        self.assertEqual([x["id"] for x in result["images"]], ["I1", "I2"])
+        warnings = " ".join(result["checks"]["warnings"])
+        self.assertIn("仅取得 2 张", warnings)
+        self.assertIn("门店朋友圈", warnings)
 
     def test_exports_exclude_credentials_headers_signed_urls_and_internal_media_ids(self):
         self.ima.result["sources"][0]["official_url"] = "https://bucket.myqcloud.com/document?sign=private-signature-marker"

@@ -259,6 +259,20 @@ _FIT_ADVICE = [
 ]
 
 
+def _short_title(text, limit: int) -> str:
+    """Trim a title to the platform limit at a punctuation boundary."""
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for separator in ("：", "，", "、", "|", "？", "！", "；", " "):
+        position = cut.rfind(separator)
+        if position >= 8:
+            cut = cut[:position]
+            break
+    return cut.rstrip(" ，、；：|") or (text[:limit - 1] + "…")
+
+
 def _fit_platform_units(accepted: list[dict], facts: list[dict], strategy: dict, platform: str) -> list[str]:
     """Deterministically complete platform shape after the independent audit.
 
@@ -533,9 +547,6 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                     return _empty("blocked", "### 没有可用的事实依据\n\n未能获取该型号的授权知识库正文或华为官方商城商品正文，本次停止生成。请确认资料权限或提供准确的官方商城商品页链接。", trace)
                 images = [i.copy() for i in result.get("images", []) if normalize(i.get("model", "")) == normalize(product)
                           and _displayable_image(i)]
-                if len(images) < strategy["image_min"]:
-                    return _empty("needs_clarification", f"### 同型号配图数量不足\n\n{platform}需要至少{strategy['image_min']}张图片，本次只有{len(images)}张可验证的同型号素材。请补充获授权的同型号图库，或换用图片数量要求较少的平台。\n\n没有使用其他型号图片凑数。", trace,
-                                  strategy=strategy, checks={"publication": "配图不足，未交付文案"})
                 step("资料与配图检索", 0.3, f"{mode_label}：已读取{len(sources)}份型号资料（含{len(mall_sources)}份官方商城正文）、{len(images)}张知识库同型号原图。")
             model = LLMClient(api_config) if api_config else LLMClient()
             # Full per-product facts/limits are supplied; historical marketing/price docs are not trusted facts.
@@ -647,14 +658,7 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         title_text = str(draft.get("title", "")).strip()
         title_truncated = False
         if len(title_text) > strategy["title_max"]:
-            cut = title_text[:strategy["title_max"]]
-            for separator in ("：", "，", "、", "|", "？", "！", "；", " "):
-                position = cut.rfind(separator)
-                if position >= 8:
-                    cut = cut[:position]
-                    break
-            cut = cut.rstrip(" ，、；：|")
-            draft["title"] = cut or (title_text[:strategy["title_max"] - 1] + "…")
+            draft["title"] = _short_title(title_text, strategy["title_max"])
             title_truncated = True
         units = draft_units(draft, strategy)
         if strategy.get("customer_insight"):
@@ -691,7 +695,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
             if issues:
                 removed.append({"id": unit["id"], "reason": "；".join(issues)})
                 if unit["id"] == "title":
-                    accepted.append({"id": "title", "text": product + "｜" + scenario + "选购参考", "fact_ids": []})
+                    accepted.append({"id": "title", "text": _short_title(product + "｜" + scenario + "选购参考",
+                                                                        strategy["title_max"]), "fact_ids": []})
                 elif unit["id"] == "cta":
                     accepted.append({"id": "cta", "text": strategy["cta"], "fact_ids": []})
             else:
@@ -728,12 +733,15 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                 selected.append(image)
                 used.add(image['id'])
         selected = selected[:strategy['image_max']]
+        image_shortage = len(selected) < strategy["image_min"]
         warnings = list(result.get("warnings", [])) + rejected + shape_notes
+        if image_shortage and not vmall_only:
+            warnings.append(
+                f"本次仅取得 {len(selected)} 张可验证的同型号配图，{platform}建议至少 {strategy['image_min']} 张；"
+                "为不中断交付，已按「配图不足的待审草稿」生成，未使用其他型号或网络图片凑数。"
+                "可补充获授权同型号图库或门店实拍，或改用门店朋友圈 / 门店海报（1 张起）后再发布。")
         if title_truncated:
             warnings.append("标题超过平台上限，已按标点截断到上限内，请人工确认措辞。")
-        if len(selected) < strategy["image_min"] and not vmall_only:
-            return _empty("needs_clarification", "### 同型号配图数量不足\n\n未能完成平台要求的图文编排，请补充获授权素材或更换平台；本次不交付文案。", trace,
-                          strategy=strategy, checks={"publication": "配图不足，未交付文案"})
         pending = [str(x) for x in extracted.get("unknowns", [])] + [str(x) for x in audit.get("warnings", [])]
         pending.append("当天价格、补贴、库存、赠品及具体销售SKU需另行人工确认，未写入本稿。")
         demos = [{k: u[k] for k in ("action", "speech", "observe", "fact_ids")}
@@ -767,8 +775,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         if not checks["length_target_met"]:
             checks["warnings"].append("审核删减后正文篇幅未达平台目标；保留已核验内容，建议修改后再发布。")
         preview = build_preview(accepted, selected, task, mode_label)
-        if preview.count('<img src="data:image/') < strategy["image_min"] and not vmall_only:
-            return _empty("needs_clarification", "### 配图预览校验失败\n\n图片无法完整显示，未达到平台最低图数；请补充可读取的同型号素材后重试。", trace)
+        if preview.count('<img src="data:image/') < strategy["image_min"]:
+            checks["warnings"].append("预览中可嵌入的配图少于平台建议张数；已按配图不足的待审草稿交付，未使用其他型号图片。")
         out_dir = Path(tempfile.mkdtemp(prefix="zhiheng-export-"))
         delivery = export_delivery(accepted, selected, task, mode_label, out_dir, copy)
         checks["platform_checks"] = delivery["platform_checks"]

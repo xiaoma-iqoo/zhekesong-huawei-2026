@@ -109,9 +109,14 @@ def build_simple(api_state, fallback_products, ima_state=None):
             if result.get('status') != 'ready':
                 return {**updates, notice: result.get('report', '当前信息不足或资料未通过核验，请补充后重试。')}
             signature = digest([selected_product, selected_audience, selected_platform, payload['state'], ''])
-            draft = result.get('checks', {}).get('platform_ready') is False
+            result_checks = result.get('checks', {})
+            draft = result_checks.get('platform_ready') is False
+            issues = (result_checks.get('platform_checks') or {}).get('issues') or []
+            reason = issues[0] if issues else '平台格式尚未全部达标'
+            if '配图' in reason:
+                reason += ' 可补充授权同型号配图，或改用门店朋友圈 / 门店海报（1 张起）。'
             updates.update({result_panel: gr.update(visible=True), delivery: {'signature': signature, 'result': result}, confirm: gr.update(interactive=True),
-                            notice: '### 草稿已生成，等待审阅\n平台格式尚未全部达标，确认后可下载带草稿标记的材料。' if draft else '### 文案已生成，等待审阅\n核对文字、配图和来源后，点击确认解锁下载。',
+                            notice: ('### 草稿已生成，等待审阅\n' + reason + '；确认后可下载带草稿标记的材料。') if draft else '### 文案已生成，等待审阅\n核对文字、配图和来源后，点击确认解锁下载。',
                             preview: result.get('preview_html', ''), copy_text: result.get('publish_copy', result.get('copy_text', '')),
                             gallery: [(i['path'], i.get('caption', '')) for i in result.get('images', [])],
                             report: result.get('report', ''), checks: result.get('checks', {})})

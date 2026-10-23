@@ -315,7 +315,7 @@ class SimpleFlowTests(unittest.TestCase):
                 self.flow.generate_now({}, PRODUCT, '上班族', '门店朋友圈', api_config=API)
         self.assertNotIn('private-catalog-error', str(caught.exception))
 
-    def test_existing_mock_backend_runs_all_four_audit_phases_and_keeps_image_gate(self):
+    def test_existing_mock_backend_runs_all_four_audit_phases_and_degrades_when_images_missing(self):
         import sys
         from pathlib import Path
         tests_dir = str(Path(__file__).resolve().parent)
@@ -334,9 +334,11 @@ class SimpleFlowTests(unittest.TestCase):
             harness.model.calls.clear()
             harness.ima.result['images'] = []
             with patch('agent.fetch_vmall_sources', return_value=[]):
-                blocked = self.flow.generate_now({}, PRODUCT, '上班族', '门店朋友圈', api_config=API)
-            self.assertEqual(blocked['result']['status'], 'needs_clarification')
-            self.assertEqual(harness.phases(), [])
+                degraded = self.flow.generate_now({}, PRODUCT, '上班族', '门店朋友圈', api_config=API)
+            self.assertEqual(degraded['result']['status'], 'ready', degraded['result'].get('report'))
+            self.assertFalse(degraded['result']['checks']['platform_ready'], '没有配图时必须按草稿交付')
+            self.assertEqual(degraded['result']['images'], [])
+            self.assertEqual(harness.phases(), ['extract', 'fact_review', 'compose', 'audit'])
         finally:
             harness.doCleanups()
 
