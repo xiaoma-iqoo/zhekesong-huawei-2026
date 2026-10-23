@@ -42,6 +42,8 @@ VERSION = "1.1.0"
 _SESSION_IMA: ContextVar[dict | None] = ContextVar("zhiheng_session_ima", default=None)
 _SESSION_CLIENTS: OrderedDict[str, IMAClient] = OrderedDict()
 _SESSION_LOCK = threading.Lock()
+_DEFAULT_CLIENTS: OrderedDict[str, IMAClient] = OrderedDict()
+_DEFAULT_LOCK = threading.Lock()
 
 
 def resolve_ima_config(raw: dict | None) -> dict | None:
@@ -91,11 +93,7 @@ def _session_client(config: dict) -> IMAClient:
         return client
 
 
-def _ima() -> IMAClient:
-    session = _SESSION_IMA.get()
-    if session:
-        # User-supplied live ima always wins and never falls back to local material.
-        return _session_client(session)
+def _build_default_client() -> IMAClient:
     from knowledge_store import get_archive_path, get_workspace_archive
     explicit = "IMA_SOURCE_MODE" in os.environ
     archive_configured = any(key in os.environ for key in ("IMA_ARCHIVE_PATH", "IMA_ARCHIVE_URL", "IMA_ARCHIVE_SHA256", "IMA_ARCHIVE_TOKEN"))
@@ -116,6 +114,33 @@ def _ima() -> IMAClient:
         client.load_archive(path)
         client._workspace_authorized = workspace
     return client
+
+
+def _ima_cache_key() -> str:
+    from knowledge_store import WORKSPACE_ROOT
+    parts = {name: os.environ.get(name, "") for name in (
+        "IMA_SOURCE_MODE", "IMA_ARCHIVE_PATH", "IMA_ARCHIVE_URL", "IMA_ARCHIVE_SHA256",
+        "IMA_ARCHIVE_TOKEN", "IMA_KB_NAME")}
+    parts["workspace_root"] = str(WORKSPACE_ROOT)
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _ima() -> IMAClient:
+    session = _SESSION_IMA.get()
+    if session:
+        # User-supplied live ima always wins and never falls back to local material.
+        return _session_client(session)
+    key = _ima_cache_key()
+    with _DEFAULT_LOCK:
+        client = _DEFAULT_CLIENTS.get(key)
+        if client is None:
+            client = _build_default_client()
+            _DEFAULT_CLIENTS[key] = client
+            while len(_DEFAULT_CLIENTS) > 4:
+                _DEFAULT_CLIENTS.popitem(last=False)
+        else:
+            _DEFAULT_CLIENTS.move_to_end(key)
+        return client
 
 
 def get_products() -> list[str]:

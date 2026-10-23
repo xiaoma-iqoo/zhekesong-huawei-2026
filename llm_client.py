@@ -108,6 +108,12 @@ class LLMClient:
             "temperature": 0.3,
             "max_tokens": max_tokens,
         }
+        # ModelScope-hosted reasoning models otherwise spend tens of seconds on
+        # hidden thinking and can exceed the Studio request timeout; the app's
+        # four-stage pipeline only needs the final JSON.
+        if (os.environ.get("LLM_DISABLE_THINKING", "").strip() == "1"
+                or "api-inference.modelscope.cn" in self.base):
+            body["enable_thinking"] = False
         attempts = [(self.model, 3)] + [(name, 2) for name in self.fallback_models]
         try:
             connect_timeout = float(os.environ.get("LLM_CONNECT_TIMEOUT", "20") or 20)

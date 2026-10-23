@@ -454,6 +454,19 @@ demo.queue(default_concurrency_limit=1, max_size=8, api_open=False)
 
 if __name__ == "__main__":
     import os
+    import threading
+
+    def _warm_catalog():
+        # Load the authorized archive / workspace snapshot once at startup so the
+        # first user request in Studio does not pay the archive-load latency.
+        try:
+            import agent
+            agent.get_products()
+            agent.get_connection_status()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm_catalog, name="zhiheng-warmup", daemon=True).start()
 
     # 部署到魔搭创空间时没有本地知识库目录，快发模式的配图从私有归档 ZIP 解到
     # 系统临时目录；Gradio 需要显式放行该目录才能把图片喂给 Gallery。
