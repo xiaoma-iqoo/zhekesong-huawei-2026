@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
 import html
+import re
 import threading
 import json
 import os
@@ -244,6 +245,80 @@ def _format_copy(units: list[dict], product: str, strategy: dict) -> str:
     return "\n\n".join(chunks)
 
 
+_FIT_ADVICE = [
+    ("选购前先确认这几点",
+     "选购前，建议先把已核验的信息对照一遍：{facts}。这些信息对应具体版本与条件，实际体验请以现场核对为准。"),
+    ("到店可以这样验证",
+     "到店时建议带着常用文件、软件清单和日常背包，实际试一遍：看看屏幕在常用亮度下是否舒服、"
+     "接口能否直接接上现有设备、机身重量放进包里是否合适。遇到导购演示的智能功能，先问清楚支持的系统版本、"
+     "账号条件和配件要求，再判断是否符合自己的使用习惯。"),
+    ("把真实使用场景写进选择",
+     "先用一句话写下这台设备每天要完成的三件事，再判断参数是否真的影响效率：如果以文档、表格和会议为主，"
+     "稳定与便携优先；如果涉及设计或视频，先确认屏幕、性能与软件版本条件。把需要现场确认的问题列成清单，"
+     "到店逐项验证，比只看参数更可靠。"),
+]
+
+
+def _fit_platform_units(accepted: list[dict], facts: list[dict], strategy: dict, platform: str) -> list[str]:
+    """Deterministically complete platform shape after the independent audit.
+
+    Only verified fact statements and generic shopping advice are appended; no new
+    product claims or numbers are invented. Every addition is reported as a warning.
+    """
+    notes: list[str] = []
+
+    def body_chars() -> int:
+        text = "".join(str(u.get("text", "")) for u in accepted
+                       if u["id"] in {"intro", "cta"} or u["id"].startswith("section_"))
+        return len(re.findall(r"[\u4e00-\u9fff]", text))
+
+    title = next((u for u in accepted if u["id"] == "title"), None)
+    if title is not None and not str(title.get("text", "")).strip():
+        fallback = f"{strategy.get('scene_label') or strategy.get('scenario') or '职场'}选购参考"
+        title["text"] = fallback[:strategy["title_max"]]
+        notes.append("模型未给出标题，已用产品与场景生成标题占位，请人工确认。")
+
+    if platform in {"微信公众号", "门店海报"} and not any(
+            u["id"] == "intro" and str(u.get("text", "")).strip() for u in accepted):
+        accepted.insert(1, {"id": "intro", "text": "先把真实使用场景和常用软件想清楚，再对照已核验的产品信息做决定。",
+                            "fact_ids": []})
+        notes.append("补齐平台要求的导语（通用建议，未新增产品事实），请人工确认。")
+
+    tags = next((u for u in accepted if u["id"] == "tags"), None)
+    if strategy.get("tags") and (tags is None or not re.search(r"#[^\s#]+", str(tags.get("text", "")))):
+        product_key = re.sub(r"[\s（）()]", "", str(strategy.get("product", "")))[:16]
+        fallback_tags = " ".join(t for t in (
+            "#" + product_key if product_key else "",
+            "#" + str(strategy.get("scenario", "")).replace(" ", "") if strategy.get("scenario") else "",
+            "#选购参考") if t)
+        if tags is None:
+            accepted.append({"id": "tags", "text": fallback_tags, "fact_ids": []})
+        else:
+            tags["text"] = fallback_tags
+        notes.append("补齐小红书话题标签，请人工确认标签措辞。")
+
+    if not any(str(u.get("text", "")).strip() for u in accepted if u["id"] == "cta"):
+        accepted.append({"id": "cta", "text": str(strategy.get("cta", "")), "fact_ids": []})
+        notes.append("补齐平台行动引导（通用建议），请人工确认。")
+
+    fact_sentences = "；".join(str(f.get("statement", "")).strip() for f in facts[:3] if f.get("statement"))
+    minimum = {"小红书": 350, "微信公众号": 650, "门店朋友圈": 80, "门店海报": 40}.get(platform, 80)
+    sections = [u for u in accepted if u["id"].startswith("section_")]
+    index = 0
+    while body_chars() < minimum and len(sections) < int(strategy["sections"]):
+        heading, template = _FIT_ADVICE[index % len(_FIT_ADVICE)]
+        used = [f["id"] for f in facts[:3]] if "{facts}" in template else []
+        text = template.format(facts=fact_sentences) if "{facts}" in template else template
+        if not text.strip():
+            break
+        unit = {"id": f"section_{len(sections) + 1}", "heading": heading, "text": text, "fact_ids": used}
+        accepted.append(unit)
+        sections.append(unit)
+        index += 1
+        notes.append("为保证平台篇幅，补充了基于已核验事实与通用建议的段落，请人工复核。")
+    return notes
+
+
 def _report(task: dict, strategy: dict, facts: list[dict], copy: str, images: list[dict], checks: dict, sources: list[dict]) -> str:
     lines = ["## 一、场景判断", f"**产品：** {task['product']}  ",
              f"**目标人群 / 使用场景：** {task['audience']} / {task['scenario']}  ",
@@ -468,10 +543,10 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                                 "origin": s.get("origin", knowledge_mode),
                                 "official_url": _public_url(s.get("official_url", "")),
                                 "retrieved_at": s.get("retrieved_at", ""),
-                                "text": s["text"][:26000]} for s in sources if s.get("kind") != "price"]
+                                "text": s["text"][:16000]} for s in sources if s.get("kind") != "price"]
             image_meta = [{k: i.get(k, "") for k in ("id", "title", "caption", "model")} for i in images]
             extracted = model.json(EXTRACT_PROMPT, {"task": task, "strategy": strategy, "sources": payload_sources,
-                                                   "available_images": image_meta})
+                                                   "available_images": image_meta}, max_tokens=4000)
             if isinstance(extracted.get("customer_insight"), dict):
                 strategy["customer_insight"] = extracted["customer_insight"]
             if extracted.get("conflicts"):
@@ -480,7 +555,7 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
             facts, rejected = evidence_facts(extracted, sources)
             if not facts:
                 return _empty("blocked", "### 事实来源校验未通过\n\n没有事实能够在本次授权知识库或华为官方商城正文中逐字定位，本次停止生成。请重试或核对资料。", trace)
-            evidence_review = model.json(FACT_REVIEW_PROMPT, {"facts": facts}, max_tokens=2500)
+            evidence_review = model.json(FACT_REVIEW_PROMPT, {"facts": facts}, max_tokens=2000)
             fact_verdicts = {x.get("id"): x for x in evidence_review.get("facts", []) if isinstance(x, dict)}
             evidence_removed = [{"id": f["id"], "reason": str(fact_verdicts.get(f["id"], {}).get("reason", "证据复核未确认该事实。"))}
                                 for f in facts if fact_verdicts.get(f["id"], {}).get("verdict") != "pass"]
@@ -517,7 +592,11 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         compose_payload = {"task": task, "strategy": strategy, "facts": facts,
                            "style_card": card, "approved_plan": strategy.get("approved_plan"),
                            "constraints": extracted.get("constraints", []), "images": image_meta}
-        draft = writer.json(COMPOSE_PROMPT, compose_payload)
+        try:
+            draft = writer.json(COMPOSE_PROMPT, compose_payload)
+        except ModelError:
+            # One bounded retry: remote JSON-mode replies are occasionally empty.
+            draft = writer.json(COMPOSE_PROMPT, compose_payload)
         # One bounded writing repair, always followed by the same independent audit.
         import re
         body_text = str(draft.get("intro", "")) + str(draft.get("cta", "")) + "".join(
@@ -552,15 +631,38 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         if repair:
             draft = writer.json(COMPOSE_PROMPT, {**compose_payload, "previous_draft": draft,
                                                 "quality_revision": repair})
+        # One extra bounded length repair: independent audit may remove whole units,
+        # so a draft that was long enough can still fall under the platform minimum.
+        if phase == "final" and (prepared is not None or os.environ.get("LLM_REPAIR_SHORT_BODY", "").strip() == "1"):
+            first_body = str(draft.get("intro", "")) + str(draft.get("cta", "")) + "".join(
+                str(x.get("text", "")) for x in draft.get("sections", []) if isinstance(x, dict))
+            first_chars = len(re.findall(r"[\u4e00-\u9fff]", first_body))
+            if first_chars < min_chars:
+                draft = writer.json(COMPOSE_PROMPT, {**compose_payload, "previous_draft": draft,
+                                                    "quality_revision": [f"正文当前{first_chars}个汉字，低于{platform}下限{min_chars}；"
+                                                                         f"请扩写到{min_chars + 60}个汉字以上，补充具体使用场景、选购取舍、"
+                                                                         "使用条件与到店验证建议，不新增未提供的事实，不重复凑字。"]})
         strategy["angle"] = str(draft.get("angle", strategy["pain"]))
         strategy["selected_priorities"] = [str(x) for x in draft.get("priorities", strategy['priorities'])]
+        title_text = str(draft.get("title", "")).strip()
+        title_truncated = False
+        if len(title_text) > strategy["title_max"]:
+            cut = title_text[:strategy["title_max"]]
+            for separator in ("：", "，", "、", "|", "？", "！", "；", " "):
+                position = cut.rfind(separator)
+                if position >= 8:
+                    cut = cut[:position]
+                    break
+            cut = cut.rstrip(" ，、；：|")
+            draft["title"] = cut or (title_text[:strategy["title_max"] - 1] + "…")
+            title_truncated = True
         units = draft_units(draft, strategy)
         if strategy.get("customer_insight"):
             units.append({"id": "customer_insight", "text": json.dumps(strategy["customer_insight"], ensure_ascii=False), "fact_ids": []})
         step("图文编排与软文生成", 0.7, "已按人群、场景与平台生成草稿，进入独立审核。")
         audit = model.json(AUDIT_PROMPT, {"task": task, "units": units, "facts": facts,
                            "constraints": extracted.get("constraints", []), "available_images": image_meta,
-                           "retrieval_mode": mode}, max_tokens=4500)
+                           "retrieval_mode": mode}, max_tokens=3200)
         if audit.get("conflict"):
             return _empty("blocked", "### 核验发现产品事实冲突\n\n请人工核实资料与具体款式，本次停止交付。", trace)
         reviewed = {u.get("id"): u for u in audit.get("units", []) if isinstance(u, dict)}
@@ -599,6 +701,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         if not body_units:
             return _empty("blocked", "### 草稿未通过发布核验\n\n正文存在无法确认的产品事实或营销表述，已拦截。请调整任务后重试。", trace,
                           strategy=strategy, facts=facts, checks={"publication": "已拦截，未发布文案", "removed_units": removed})
+        shape_notes = _fit_platform_units(accepted, facts, strategy, platform)
+        body_units = [x for x in accepted if x['id'].startswith('section_')]
         image_by_id = {i['id']: i for i in images}
         selected = []
         used = set()
@@ -624,7 +728,9 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                 selected.append(image)
                 used.add(image['id'])
         selected = selected[:strategy['image_max']]
-        warnings = list(result.get("warnings", [])) + rejected
+        warnings = list(result.get("warnings", [])) + rejected + shape_notes
+        if title_truncated:
+            warnings.append("标题超过平台上限，已按标点截断到上限内，请人工确认措辞。")
         if len(selected) < strategy["image_min"] and not vmall_only:
             return _empty("needs_clarification", "### 同型号配图数量不足\n\n未能完成平台要求的图文编排，请补充获授权素材或更换平台；本次不交付文案。", trace,
                           strategy=strategy, checks={"publication": "配图不足，未交付文案"})

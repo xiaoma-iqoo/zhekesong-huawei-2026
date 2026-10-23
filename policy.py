@@ -284,6 +284,10 @@ def draft_units(draft: dict, strategy: dict) -> list[dict]:
                           "fact_ids": demo.get("fact_ids", [])})
     units.append({"id": "cta", "text": str(draft.get("cta", "")), "fact_ids": draft.get("cta_fact_ids", []) or []})
     if strategy["tags"]:
-        tags = draft.get("tags", [])
-        units.append({"id": "tags", "text": " ".join(str(t) for t in tags[:6]), "fact_ids": []})
+        cleaned = []
+        for raw in draft.get("tags", [])[:6]:
+            tag = str(raw).strip().lstrip("#").replace(" ", "")
+            if tag:
+                cleaned.append("#" + tag)
+        units.append({"id": "tags", "text": " ".join(cleaned), "fact_ids": []})
     return units
