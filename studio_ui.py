@@ -7,7 +7,7 @@ import os
 import gradio as gr
 
 import creation_flow as flow
-from llm_client import ModelError, resolve_api_config
+from llm_client import ModelError, resolve_api_config, server_api_configured
 from style_cards import (STYLE_FIELDS, PRESET_NAMES, StyleError, get_preset, style_values,
                          style_from_values, infer_style, saved_choices, save_style, delete_style)
 
@@ -73,14 +73,14 @@ def build_studio(examples, fallback_products, desktop_html):
                     nav_buttons = [gr.Button(label, variant="primary" if i == 0 else "secondary", elem_id=f"zh-nav-{i}")
                                    for i, label in enumerate(step_labels)]
             with gr.Column(scale=5, min_width=360, elem_id="zh-main"):
-                status = gr.Markdown("### 请先配置模型 API\n填写并应用你自己的 API，然后确认需求。也可从侧栏浏览各步。", elem_id="zh-status")
+                status = gr.Markdown("### 可以直接开始创作\n线上创空间已配置服务端模型，直接确认需求即可；也可以填写自己的 API 覆盖默认模型。", elem_id="zh-status")
                 pages = []
                 with gr.Column(visible=True, elem_id="zh-page-api") as page_api:
-                    gr.Markdown("### 00 / 模型 API 设置（首次使用必填）")
+                    gr.Markdown("### 00 / 模型 API 设置（可选，默认使用服务端模型）")
                     gr.Markdown(
-                        "本应用不内置任何 API 密钥。请填写你自己的 OpenAI 兼容服务地址、密钥与模型名后，"
-                        "点「应用自定义 API」再开始创作。设置仅保存在本次会话：不写磁盘、不回显密钥、不进入报告与导出；"
-                        "接口必须为 HTTPS。"
+                        "线上创空间已配置服务端模型，可直接开始创作。若要使用自己的 OpenAI 兼容服务，请填写服务地址、密钥与模型名后"
+                        "点「应用自定义 API」。设置仅保存在本次会话：不写磁盘、不回显密钥、不进入报告与导出；"
+                        "接口必须为 HTTPS。自定义接口连接失败时会自动回退到服务端模型完成本次生成。"
                     )
                     api_base = gr.Textbox(label="服务地址（Base URL）", placeholder="https://api.deepseek.com/v1",
                                           lines=1, max_length=300)
@@ -91,7 +91,7 @@ def build_studio(examples, fallback_products, desktop_html):
                     with gr.Row():
                         api_save = gr.Button("应用自定义 API", size="sm", variant="primary")
                         api_reset = gr.Button("清空当前设置", size="sm")
-                    api_notice = gr.Markdown("当前：尚未配置。填写后点「应用自定义 API」。")
+                    api_notice = gr.Markdown("当前：使用服务端模型（可选填写自己的接口）。")
                 with gr.Column(visible=False, elem_id="zh-page-brief") as page_brief:
                     gr.Markdown("### 01 / 确认营销需求")
                     product = gr.Dropdown(fallback_products, label="产品型号", allow_custom_value=True, interactive=True)
@@ -347,10 +347,10 @@ def build_studio(examples, fallback_products, desktop_html):
 
         def extract_style(desc, ref, base, current, api):
             try:
-                if not api:
-                    return {status: ("### 请先配置模型 API\n提炼风格同样需要模型服务。请先在左上「00 / 模型 API 设置」"
-                                     "填写并应用你自己的 API。")}
-                card = infer_style(desc or "", ref or "", base, api_config=api)
+                if not api and not server_api_configured():
+                    return {status: ("### 需要模型服务\n提炼风格需要模型服务。可直接使用部署者配置的服务端模型，"
+                                     "或在左上「00 / 模型 API 设置」填写并应用自己的 API。")}
+                card = infer_style(desc or "", ref or "", base, api_config=api or None)
                 updates = invalidate_style(current)
                 updates.update({component: value for component, value in zip(card_inputs, style_values(card))})
                 updates.update({draft_source: flow.style_source_key(desc, ref), status: "### 风格卡已提炼\n请检查并编辑七项表达规则，然后确认使用。"})
@@ -366,25 +366,35 @@ def build_studio(examples, fallback_products, desktop_html):
             except Exception as exc:
                 return error(exc)
 
-        NEED_API = ("### 请先配置模型 API\n"
-                    "本应用不内置密钥。请在左上「00 / 模型 API 设置」填写服务地址、密钥（和模型名），"
+        NEED_API = ("### 需要模型服务\n"
+                    "可直接使用部署者已配置的服务端模型；也可以填写自己的 API。"
+                    "若服务端尚未配置，请在左上「00 / 模型 API 设置」填写服务地址、密钥（和模型名），"
                     "点「应用自定义 API」后再生成。")
 
         def create_idea(*args):
             try:
                 api = args[21] if len(args) > 21 else None
                 ima = args[22] if len(args) > 22 else None
-                if not api:
+                if not api and not server_api_configured():
                     return {status: NEED_API}
                 current, request, card, _, desc, ref = parts(args)
                 flow.check_style(current, request, card, desc, ref)
+                fallback = False
                 with agent.ima_session(ima):
-                    result = agent.run_task(**request, phase="plan", style_card=card, api_config=api)
+                    try:
+                        result = agent.run_task(**request, phase="plan", style_card=card, api_config=api or None)
+                    except ModelError:
+                        if not api or not server_api_configured():
+                            raise
+                        result = agent.run_task(**request, phase="plan", style_card=card, api_config=None)
+                        fallback = True
                 new = flow.attach_idea(current, result)
                 if result.get("status") != "plan_ready":
                     return {state: new, status: result.get("report", "资料暂不可用，请重试。"), **stages(0), **lock_files()}
                 plan = result["plan"]
-                return {state: new, status: "### 创作思路已准备好\n请修改下方切入点、大纲与配图安排，然后点击「确认当前创作思路」。",
+                prefix = ("### 已改用服务端模型完成\n自定义模型接口连接失败，本次创作思路由服务端模型生成；"
+                          "如需使用自己的接口，请检查地址与网络后重新应用。\n\n" if fallback else "")
+                return {state: new, status: prefix + "### 创作思路已准备好\n请修改下方切入点、大纲与配图安排，然后点击「确认当前创作思路」。",
                         **{component: plan[key] for component, (key, _) in zip(plan_inputs, flow.PLAN_FIELDS)},
                         idea_facts: result["facts"], idea_gallery: [(i["path"], i.get("caption", "")) for i in result["images"]],
                         **stages(0, 1), **lock_files(), **stale_final()}
@@ -402,17 +412,25 @@ def build_studio(examples, fallback_products, desktop_html):
         def create_final(*args):
             try:
                 api = args[21] if len(args) > 21 else None
-                if not api:
+                if not api and not server_api_configured():
                     return {status: NEED_API}
                 current, request, card, plan, desc, ref = parts(args)
                 kwargs = flow.generation_args(current, request, card, plan, desc, ref)
-                result = agent.run_task(**request, api_config=api, **kwargs)
+                fallback = False
+                try:
+                    result = agent.run_task(**request, api_config=api or None, **kwargs)
+                except ModelError:
+                    if not api or not server_api_configured():
+                        raise
+                    result = agent.run_task(**request, api_config=None, **kwargs)
+                    fallback = True
                 new = flow.attach_final(current, result)
                 if result.get("status") != "ready":
                     return {state: new, status: result.get("report", "本次暂未完成，请重试。"), **stages(0, 1, 2), **lock_files()}
                 platform_ready = result.get("checks", {}).get("platform_ready", False)
-                notice = ("### 图文终稿已生成，等待你确认\n请审阅平台预览、文字和配图。确认终稿后提供下载。" if platform_ready else
-                          "### 当前为待修改草稿（仍可确认下载，材料带草稿标记）\n"
+                prefix = "已改用服务端模型完成（自定义接口连接失败）。\n\n" if fallback else ""
+                notice = (prefix + "### 图文终稿已生成，等待你确认\n请审阅平台预览、文字和配图。确认终稿后提供下载。" if platform_ready else
+                          prefix + "### 当前为待修改草稿（仍可确认下载，材料带草稿标记）\n"
                           "平台格式尚未全部达标，未达标项见「报告与核验」。"
                           "你可以先确认并下载留存：HTML 顶部与 ZIP 内「草稿说明.txt」都会标明“草稿 · 未达标”，"
                           "对外发布前请按提示修改。")
