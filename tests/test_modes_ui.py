@@ -71,9 +71,11 @@ class ModeEntryTests(unittest.TestCase):
         fake = SimpleNamespace(generate_now=backend, SimpleModeError=ValueError)
         fn = self.callback('simple_generate')
         with patch.dict(sys.modules, {'simple_flow': fake}):
-            result = fn.fn({}, 'HUAWEI MateBook Pro S', '大学生', '门店朋友圈', '尚未发送的要求', {'synthetic':True})
+            result = fn.fn({}, 'HUAWEI MateBook Pro S', '大学生', '门店朋友圈', '尚未发送的要求', {'synthetic':True},
+                           'https://www.vmall.com/product/123456.html')
         backend.assert_called_once_with({}, 'HUAWEI MateBook Pro S', '大学生', '门店朋友圈',
-                                        pending_message='尚未发送的要求', api_config={'synthetic':True})
+                                        pending_message='尚未发送的要求', api_config={'synthetic':True},
+                                        mall_url='https://www.vmall.com/product/123456.html')
         self.assertTrue(result[self.component('zh-simple-confirm')]['interactive'])
         for output in fn.outputs:
             if output.__class__.__name__ == 'File':

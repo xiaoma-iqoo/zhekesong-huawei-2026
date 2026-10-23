@@ -24,7 +24,7 @@ import time
 from ima_client import IMAClient, IMAError
 from llm_client import DEFAULT_MODEL, LLMClient, ModelError, server_api_configured
 from policy import (PLATFORM_RULES, SCENE_RULES, draft_units, evidence_facts,
-                    normalize, strategy_for, text_violations, validate_inputs)
+                    normalize, resolve_product, strategy_for, text_violations, validate_inputs)
 from prompts import EXTRACT_PROMPT, COMPOSE_PROMPT, AUDIT_PROMPT, FACT_REVIEW_PROMPT
 from preview import build_preview
 from public_payload import sanitize_public
@@ -36,7 +36,7 @@ from PIL import Image
 
 PLATFORMS = list(PLATFORM_RULES)
 SCENARIOS = list(SCENE_RULES)
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 _SESSION_IMA: ContextVar[dict | None] = ContextVar("zhiheng_session_ima", default=None)
@@ -270,7 +270,8 @@ def _report(task: dict, strategy: dict, facts: list[dict], copy: str, images: li
     lines += ["\n## 四、核验结果", f"\n**交付状态：** {checks['publication']}",
               f"\n- 资料模式：{mode_label}。缓存读取时间不等于资料发布日期。",
               f"- 产品事实：{checks['accepted_facts']} 项事实通过逐字来源校验及独立证据复核；正文单元通过独立模型审核及规则检查。",
-              f"- 图片型号：{len(images)} 张图来自{checks.get('image_mode_label', mode_label)}中的同型号目录；未使用其他型号或外部搜索配图。",
+              "- 图片型号：" + (f"{len(images)} 张图来自{checks.get('image_mode_label', mode_label)}中的同型号目录；未使用其他型号或外部搜索配图。"
+                                if images else "本次没有授权同型号配图，按纯文字草稿交付；未使用其他型号或外部搜索配图。"),
               "- 合规：未核实的价格、补贴、库存和赠品不进入文案；不伪造体验，不使用无依据对比。",
               "- 校验范围：本次检索资料及模型/规则复核，不等同于法律审查或当天销售政策核验。"]
     if checks.get("removed_facts"):
@@ -349,6 +350,7 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
             mode, mode_label = prepared["mode"], prepared["mode_label"]
             knowledge_mode = prepared["knowledge_mode"]
             mall_sources = prepared["mall_sources"]
+            vmall_only = bool(prepared.get("vmall_only", False))
             rejected, evidence_removed = prepared["rejected"], prepared["evidence_removed"]
             image_meta = [{k: image.get(k, "") for k in ("id", "title", "caption", "model")} for image in images]
             model = LLMClient(api_config) if api_config else LLMClient()
@@ -357,56 +359,84 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         else:
             products = get_products()
             if not products:
-                return _empty("error", "### 暂未能读取产品目录\n\n请刷新连接状态；本次没有用外部资料或预置答案代替 ima。", trace)
+                return _empty("error", "### 暂未能读取产品目录\n\n请刷新连接状态；知识库外的产品请在「补充要求」中粘贴华为商城具体商品页链接"
+                                       "（如 https://www.vmall.com/product/123456.html）。", trace)
             canonical, questions = validate_inputs(product, audience, scenario, platform, products)
-            if questions:
-                return _empty("needs_clarification", "### 需要先确认的信息\n\n" + "\n".join("- " + q for q in questions), trace)
-            product = canonical
             source_requests = requirements + "\n" + revision
+            vmall_only = False
+            mall_sources = []
+            if not canonical:
+                # 知识库之外的产品：只允许用户明确提供的华为商城商品页作为事实来源。
+                mall_sources = fetch_vmall_sources(product, source_requests)
+                if not mall_sources:
+                    detail = "\n".join("- " + q for q in questions) if questions else "- 请先确认产品型号。"
+                    return _empty("needs_clarification",
+                                  "### 需要先确认的信息\n\n" + detail
+                                  + "\n\n如果这是知识库之外的华为产品，请在「补充要求」中粘贴华为商城具体商品页链接"
+                                    "（如 https://www.vmall.com/product/123456.html）；应用会读取该商品规格作为事实依据，"
+                                    "不会读取推荐位、搜索页或价格信息。", trace)
+                vmall_only = True
+            elif questions:
+                return _empty("needs_clarification", "### 需要先确认的信息\n\n" + "\n".join("- " + q for q in questions), trace)
+            product = str(product).strip()[:180] if vmall_only else canonical
             task = sanitize_public({"product": product, "audience": audience, "scenario": scenario, "platform": platform,
                                     "goal": goal, "requirements": requirements, "revision": revision})
             audience, requirements = task["audience"], task["requirements"]
             strategy = strategy_for(audience, scenario, platform, task["goal"])
             step("场景与平台策略", 0.1, f"已确定{scenario}的使用问题与{platform}的结构/配图规则。")
-            result = _ima().retrieve(product, query=f"{scenario} {audience} {requirements}", max_sources=5,
-                                      max_images=strategy["image_max"])
-            if normalize(result.get("product", "")) != normalize(product):
-                return _empty("blocked", "### 型号核对未通过\n\n检索返回的型号与任务不一致，本次停止生成，请重新选择准确型号。", trace)
-            mode = result.get("retrieval_mode", "live_ima")
-            valid_origins = {"live_ima", "ima_cache", "offline_archive"}
-            origins = {item.get("origin", mode) for item in result.get("sources", []) + result.get("images", [])}
-            source_mismatch = (mode not in valid_origins | {"mixed"}
-                               or bool(result.get("offline_archive", False)) != (mode == "offline_archive")
-                               or not origins <= valid_origins
-                               or (mode != "mixed" and bool(origins - {mode}))
-                               or (mode == "mixed" and "offline_archive" in origins))
-            if source_mismatch:
-                return _empty("blocked", "### 资料来源模式未通过核对\n\n返回的来源标记未知或互相矛盾，请部署者检查配置；本次未调用写作模型。", trace)
-            knowledge_mode = mode
-            mode_label = {"live_ima": "实时 ima", "ima_cache": "ima 已检索缓存",
-                          "offline_archive": "主办方 ZIP 缓存（非实时 ima）", "mixed": "ima 检索与缓存混合"}[mode]
-            sources = [s.copy() for s in result.get("sources", []) if s.get("text")]
-            mall_sources = fetch_vmall_sources(product, source_requests)
-            used_source_ids = {s["id"] for s in sources}
-            next_source = 1
-            for source in mall_sources:
-                while f"S{next_source}" in used_source_ids:
+            if vmall_only:
+                sources, next_source = [], 1
+                for item in mall_sources:
+                    item = item.copy()
+                    item["id"] = f"S{next_source}"
                     next_source += 1
-                source = source.copy()
-                source["id"] = f"S{next_source}"
-                used_source_ids.add(source["id"])
-                sources.append(source)
-            if mall_sources:
-                mode = "mixed"
-                mode_label += " + 华为官方商城本次读取"
-            if not sources:
-                return _empty("blocked", "### 没有可用的事实依据\n\n未能获取该型号的授权知识库正文或华为官方商城商品正文，本次停止生成。请确认资料权限或提供准确的官方商城商品页链接。", trace)
-            images = [i.copy() for i in result.get("images", []) if normalize(i.get("model", "")) == normalize(product)
-                      and _displayable_image(i)]
-            if len(images) < strategy["image_min"]:
-                return _empty("needs_clarification", f"### 同型号配图数量不足\n\n{platform}需要至少{strategy['image_min']}张图片，本次只有{len(images)}张可验证的同型号素材。请补充获授权的同型号图库，或换用图片数量要求较少的平台。\n\n没有使用其他型号图片凑数。", trace,
-                              strategy=strategy, checks={"publication": "配图不足，未交付文案"})
-            step("资料与配图检索", 0.3, f"{mode_label}：已读取{len(sources)}份型号资料（含{len(mall_sources)}份官方商城正文）、{len(images)}张知识库同型号原图。")
+                    sources.append(item)
+                mall_sources = sources
+                images = []
+                mode, knowledge_mode = "official_vmall", "official_vmall"
+                mode_label = "华为官方商城本次读取（无授权知识库配图）"
+                result = {"warnings": ["本次仅使用华为商城商品页事实；未取得该型号的授权知识库配图，交付为纯文字草稿。"]}
+                step("资料与配图检索", 0.3, f"华为官方商城：已读取{len(sources)}份商品页正文；该型号暂无授权知识库配图。")
+            else:
+                result = _ima().retrieve(product, query=f"{scenario} {audience} {requirements}", max_sources=5,
+                                          max_images=strategy["image_max"])
+                if normalize(result.get("product", "")) != normalize(product):
+                    return _empty("blocked", "### 型号核对未通过\n\n检索返回的型号与任务不一致，本次停止生成，请重新选择准确型号。", trace)
+                mode = result.get("retrieval_mode", "live_ima")
+                valid_origins = {"live_ima", "ima_cache", "offline_archive"}
+                origins = {item.get("origin", mode) for item in result.get("sources", []) + result.get("images", [])}
+                source_mismatch = (mode not in valid_origins | {"mixed"}
+                                   or bool(result.get("offline_archive", False)) != (mode == "offline_archive")
+                                   or not origins <= valid_origins
+                                   or (mode != "mixed" and bool(origins - {mode}))
+                                   or (mode == "mixed" and "offline_archive" in origins))
+                if source_mismatch:
+                    return _empty("blocked", "### 资料来源模式未通过核对\n\n返回的来源标记未知或互相矛盾，请部署者检查配置；本次未调用写作模型。", trace)
+                knowledge_mode = mode
+                mode_label = {"live_ima": "实时 ima", "ima_cache": "ima 已检索缓存",
+                              "offline_archive": "主办方 ZIP 缓存（非实时 ima）", "mixed": "ima 检索与缓存混合"}[mode]
+                sources = [s.copy() for s in result.get("sources", []) if s.get("text")]
+                mall_sources = fetch_vmall_sources(product, source_requests)
+                used_source_ids = {s["id"] for s in sources}
+                next_source = 1
+                for source in mall_sources:
+                    while f"S{next_source}" in used_source_ids:
+                        next_source += 1
+                    source = source.copy()
+                    source["id"] = f"S{next_source}"
+                    used_source_ids.add(source["id"])
+                    sources.append(source)
+                if mall_sources:
+                    mode = "mixed"
+                    mode_label += " + 华为官方商城本次读取"
+                if not sources:
+                    return _empty("blocked", "### 没有可用的事实依据\n\n未能获取该型号的授权知识库正文或华为官方商城商品正文，本次停止生成。请确认资料权限或提供准确的官方商城商品页链接。", trace)
+                images = [i.copy() for i in result.get("images", []) if normalize(i.get("model", "")) == normalize(product)
+                          and _displayable_image(i)]
+                if len(images) < strategy["image_min"]:
+                    return _empty("needs_clarification", f"### 同型号配图数量不足\n\n{platform}需要至少{strategy['image_min']}张图片，本次只有{len(images)}张可验证的同型号素材。请补充获授权的同型号图库，或换用图片数量要求较少的平台。\n\n没有使用其他型号图片凑数。", trace,
+                                  strategy=strategy, checks={"publication": "配图不足，未交付文案"})
+                step("资料与配图检索", 0.3, f"{mode_label}：已读取{len(sources)}份型号资料（含{len(mall_sources)}份官方商城正文）、{len(images)}张知识库同型号原图。")
             model = LLMClient(api_config) if api_config else LLMClient()
             # Full per-product facts/limits are supplied; historical marketing/price docs are not trusted facts.
             payload_sources = [{"id": s["id"], "title": s["title"], "kind": s.get("kind", "facts"),
@@ -441,7 +471,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                        "mall_sources": [s for s in _public_sources(sources) if s.get("origin") == "official_vmall"],
                        "rejected": rejected, "evidence_removed": evidence_removed,
                        "retrieval_warnings": sanitize_public(result.get("warnings", [])),
-                       "input_key": input_key, "style_key": digest(card), "created_at": time.time(), "trace": trace}
+                       "input_key": input_key, "style_key": digest(card), "created_at": time.time(), "trace": trace,
+                       "vmall_only": vmall_only}
             return {"status": "plan_ready", "plan": make_plan(context), "prepared": context,
                     "facts": sanitize_public(facts), "images": images, "strategy": sanitize_public(strategy),
                     "checks": {"data_mode_label": mode_label}, "trace": sanitize_public(trace)}
@@ -558,7 +589,7 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                 used.add(image['id'])
         selected = selected[:strategy['image_max']]
         warnings = list(result.get("warnings", [])) + rejected
-        if len(selected) < strategy["image_min"]:
+        if len(selected) < strategy["image_min"] and not vmall_only:
             return _empty("needs_clarification", "### 同型号配图数量不足\n\n未能完成平台要求的图文编排，请补充获授权素材或更换平台；本次不交付文案。", trace,
                           strategy=strategy, checks={"publication": "配图不足，未交付文案"})
         pending = [str(x) for x in extracted.get("unknowns", [])] + [str(x) for x in audit.get("warnings", [])]
@@ -567,11 +598,12 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                  for u in accepted if u["id"].startswith("demo_")]
         strategy["demo_steps"] = demos
         checks = {"publication": "已通过本次资料依据与内容核验；发布前请复核目标SKU和当天政策",
+                  "vmall_only": vmall_only,
                   "accepted_demo_steps": len(demos),
                    "knowledge_retrieval_mode": knowledge_mode,
                    "source_origins": sorted({s.get("origin", knowledge_mode) for s in sources + selected}),
                    "official_vmall_sources": len(mall_sources),
-                   "image_mode_label": "、".join(sorted({_origin_label(i.get("origin", knowledge_mode)) for i in selected})),
+                   "image_mode_label": "、".join(sorted({_origin_label(i.get("origin", knowledge_mode)) for i in selected})) or "华为官方商城（无授权配图）",
                   "retrieval_mode": mode, "data_mode_label": mode_label,
                   "accepted_facts": len(facts), "accepted_text_units": len(accepted), "ima_images": len(selected),
                   "removed_facts": evidence_removed,
@@ -593,7 +625,7 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         if not checks["length_target_met"]:
             checks["warnings"].append("审核删减后正文篇幅未达平台目标；保留已核验内容，建议修改后再发布。")
         preview = build_preview(accepted, selected, task, mode_label)
-        if preview.count('<img src="data:image/') < strategy["image_min"]:
+        if preview.count('<img src="data:image/') < strategy["image_min"] and not vmall_only:
             return _empty("needs_clarification", "### 配图预览校验失败\n\n图片无法完整显示，未达到平台最低图数；请补充可读取的同型号素材后重试。", trace)
         out_dir = Path(tempfile.mkdtemp(prefix="zhiheng-export-"))
         delivery = export_delivery(accepted, selected, task, mode_label, out_dir, copy)
@@ -601,6 +633,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
         checks["platform_ready"] = bool(delivery["platform_checks"].get("ready"))
         if not checks["platform_ready"]:
             checks["warnings"].extend(delivery["platform_checks"].get("issues", []))
+            if vmall_only:
+                checks["warnings"].append("本次仅有华为商城商品页文字依据、没有授权配图，按纯文字草稿交付；配图和排版需门店补充后再发布。")
             checks["publication"] = "待修改：平台格式未全部达标；当前为待审草稿"
         report = _report(task, strategy, facts, copy, selected, checks, public["sources"])
         report += "\n\n## 平台排版与交付\n\n" + delivery["delivery_notes"]

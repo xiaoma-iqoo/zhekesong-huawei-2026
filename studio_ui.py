@@ -104,8 +104,8 @@ def build_studio(examples, fallback_products, desktop_html):
                         scenario = gr.Dropdown(list(agent.SCENARIOS), value="开学季", label="营销场景")
                         platform = gr.Dropdown(agent.PLATFORMS, value="小红书", label="发布平台")
                     goal = gr.Dropdown(["种草了解", "选购决策", "到店体验", "企业咨询"], value="种草了解", label="营销目标")
-                    requirements = gr.Textbox(label="补充要求 / 华为官方商城商品链接", lines=3,
-                                              placeholder="门店信息、内容要求，或 https://www.vmall.com/product/商品编号.html")
+                    requirements = gr.Textbox(label="补充要求 / 华为商城商品链接", lines=3,
+                                              placeholder="门店信息、内容要求；知识库外的华为产品请粘贴具体商品页，如 https://www.vmall.com/product/商品编号.html")
                     with gr.Row(elem_id="zh-examples"):
                         example_buttons = [gr.Button(label, size="sm") for label in ["校园 · 小红书", "办公 · 公众号", "到店 · 朋友圈"]]
                     brief_button = gr.Button("确认需求，进入风格选择", variant="primary")

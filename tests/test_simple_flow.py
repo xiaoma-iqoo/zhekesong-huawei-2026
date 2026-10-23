@@ -354,3 +354,24 @@ class SimpleFlowTests(unittest.TestCase):
         self.assertIn('API', system)
         self.assertNotIn(API['api_key'], json.dumps(out))
         self.assertIn('轻薄本', out['summary'])
+
+    def test_catalog_miss_with_mall_link_keeps_typed_model_and_passes_link(self):
+        result = {'status': 'ready', 'copy_text': '合成草稿', 'checks': {'publication': '待审草稿'}}
+        with patch('simple_flow.agent.run_task', return_value=result) as run:
+            out = self.flow.generate_now({}, 'HUAWEI Mate 70 Pro', '职场新人', '门店朋友圈',
+                                         api_config=API,
+                                         mall_url='https://www.vmall.com/product/123456.html')
+        self.assertIs(out['result'], result)
+        self.assertEqual(run.call_args.kwargs['product'], 'HUAWEI Mate 70 Pro')
+        self.assertIn('华为商城商品页：https://www.vmall.com/product/123456.html',
+                      run.call_args.kwargs['requirements'])
+        self.assertIn('华为商城商品页', out['summary'])
+
+    def test_catalog_miss_without_mall_link_still_asks_for_exact_model(self):
+        with self.assertRaisesRegex(self.flow.SimpleModeError, '华为商城'):
+            self.flow.generate_now({}, '轻薄本', '上班族', '门店朋友圈', api_config=API)
+
+    def test_mall_link_longer_than_limit_is_rejected(self):
+        long_url = 'https://www.vmall.com/product/' + '1' * 600
+        with self.assertRaisesRegex(self.flow.SimpleModeError, '链接过长'):
+            self.flow.generate_now({}, PRODUCT, '上班族', '门店朋友圈', api_config=API, mall_url=long_url)

@@ -109,6 +109,16 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
         attempts = [(self.model, 3)] + [(name, 2) for name in self.fallback_models]
+        try:
+            connect_timeout = float(os.environ.get("LLM_CONNECT_TIMEOUT", "20") or 20)
+        except ValueError:
+            connect_timeout = 20.0
+        try:
+            read_timeout = float(os.environ.get("LLM_READ_TIMEOUT", "180") or 180)
+        except ValueError:
+            read_timeout = 180.0
+        connect_timeout = max(5.0, min(connect_timeout, 60.0))
+        read_timeout = max(30.0, min(read_timeout, 300.0))
         last_status = 0
         for model_name, tries in attempts:
             body["model"] = model_name
@@ -118,10 +128,11 @@ class LLMClient:
                         self.base + "/chat/completions",
                         headers={"Authorization": "Bearer " + self.key, "Content-Type": "application/json"},
                         json=body,
-                        timeout=(12, 120),
+                        timeout=(connect_timeout, read_timeout),
                     )
                 except requests.RequestException:
                     if attempt < tries - 1:
+                        time.sleep(1.2 * (attempt + 1))
                         continue
                     break
                 if response.status_code in (429, 500, 502, 503, 504) and attempt < tries - 1:

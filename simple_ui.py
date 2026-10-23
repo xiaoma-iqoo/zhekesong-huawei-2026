@@ -31,6 +31,10 @@ def build_simple(api_state, fallback_products, ima_state=None):
                                  elem_id='zh-simple-audience')
             platform = gr.Dropdown(list(PLATFORM_RULES), value='小红书', label='发布平台',
                                    elem_id='zh-simple-platform')
+            mall = gr.Textbox(label='华为商城商品链接（选填）', max_length=500,
+                              placeholder='https://www.vmall.com/product/数字.html；用于知识库之外的华为产品',
+                              info='粘贴华为商城具体商品页后，可从商城读取该商品规格作为事实依据；不读取价格与推荐位。',
+                              elem_id='zh-simple-mall')
             with gr.Accordion('模型连接设置（与专业模式共用）', open=False, elem_id='zh-simple-api-settings') as api_settings:
                 gr.Markdown('未内置密钥。首次使用需配置；设置只保存在本次会话。')
                 api_base = gr.Textbox(label='极简服务地址', placeholder='https://api.deepseek.com/v1', max_length=300)
@@ -92,13 +96,14 @@ def build_simple(api_state, fallback_products, ima_state=None):
         return {state: payload['state'], chat: sanitize_public(payload.get('history', [])),
                 summary: sanitize_public(payload.get('summary', '')), message: '', **clear_result()}
 
-    def simple_generate(current, selected_product, selected_audience, selected_platform, pending, api, ima=None):
+    def simple_generate(current, selected_product, selected_audience, selected_platform, pending, api, mall_url, ima=None):
         import simple_flow
         from creation_flow import digest
         try:
             with source(ima):
                 payload = simple_flow.generate_now(current or {}, selected_product, selected_audience, selected_platform,
-                                                   pending_message=pending or '', api_config=api or None)
+                                                   pending_message=pending or '', api_config=api or None,
+                                                   mall_url=mall_url or '')
             updates = conversation_updates(payload)
             result = payload.get('result') or {}
             if result.get('status') != 'ready':
@@ -191,13 +196,14 @@ def build_simple(api_state, fallback_products, ima_state=None):
     start.click(simple_start, inputs=[product, audience, platform, api_state, message, *ima_input], **event)
     send.click(simple_send, inputs=[state, product, audience, platform, message, api_state, *ima_input], **event)
     message.submit(simple_send, inputs=[state, product, audience, platform, message, api_state, *ima_input], **event)
-    generate.click(simple_generate, inputs=[state, product, audience, platform, message, api_state, *ima_input], **event)
+    generate.click(simple_generate, inputs=[state, product, audience, platform, message, api_state, mall, *ima_input], **event)
     confirm.click(simple_confirm, inputs=[delivery, state, product, audience, platform, message], **event)
     for component in (product, audience, platform):
         component.input(simple_invalidate_basics, inputs=[], **{**event, 'trigger_mode':'always_last'})
     product.blur(simple_match_product, inputs=[product, *ima_input], outputs=[product, product_hint],
                  api_visibility='private', queue=False)
     message.input(simple_invalidate_draft, inputs=[], **{**event, 'trigger_mode':'always_last'})
+    mall.input(simple_invalidate_draft, inputs=[], **{**event, 'trigger_mode':'always_last'})
     api_outputs = [api_state, api_base, api_key, api_model, api_notice, *outputs]
     api_events = [api_save.click(simple_save_api, inputs=[api_base,api_key,api_model],
                                 **{**event,'outputs':api_outputs}),

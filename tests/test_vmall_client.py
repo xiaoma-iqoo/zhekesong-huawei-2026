@@ -183,5 +183,61 @@ class VmallTests(unittest.TestCase):
             get.assert_not_called()
 
 
+    # ---- current single-page product detail (item.vmall.com + parameterData) ----
+    def test_current_shop_page_parses_parameter_table_without_price(self):
+        html = ('<html><head><title>HUAWEI Mate 70 Pro</title></head><body><script>'
+                'window.__DATA__={"price":6499,"parameterData":{"list":{"code":"200","data":['
+                '{"name":"主要参数","data":[{"attrName":"操作系统","attrValue":"HarmonyOS 4.3"},'
+                '{"attrName":"屏幕尺寸","attrValue":"6.9英寸","attrRemark":"*按标准矩形测量，实际可视区域略小"}]},'
+                '{"name":"主体","data":[{"attrName":"传播名","attrValue":"HUAWEI Mate 70 Pro"},'
+                '{"attrName":"上市时间","attrValue":"2024年11月"}]}]}}};</script></body></html>')
+        url = 'https://item.vmall.com/product/comdetail/index.html?prdId=123456&sbomCode=2601010519577'
+        with patch("vmall_client.requests.Session.get", return_value=Response(html)):
+            result = fetch_vmall_sources("HUAWEI Mate 70 Pro", url)
+        self.assertEqual(len(result), 1)
+        source = result[0]
+        self.assertEqual(source["title"], "HUAWEI Mate 70 Pro")
+        self.assertEqual(source["official_url"], URL)
+        self.assertIn("HarmonyOS 4.3", source["text"])
+        self.assertIn("6.9英寸", source["text"])
+        self.assertIn("实际可视区域略小", source["text"])
+        self.assertNotIn("6499", source["text"])
+        self.assertNotIn("price", source["text"])
+
+    def test_current_shop_page_rejects_a_neighbouring_model(self):
+        html = ('<html><head><title>HUAWEI Mate 70 Pro</title></head><body><script>'
+                '{"parameterData":{"list":{"data":[{"name":"主要参数","data":['
+                '{"attrName":"操作系统","attrValue":"HarmonyOS 4.3"}]}]}}}</script></body></html>')
+        with patch("vmall_client.requests.Session.get", return_value=Response(html)):
+            with self.assertRaisesRegex(VmallError, "不完全一致"):
+                fetch_vmall_sources("HUAWEI Mate 70", 'https://item.vmall.com/product/comdetail/index.html?prdId=123456')
+
+    def test_mobile_shop_link_is_normalised_to_canonical_url(self):
+        with patch("vmall_client.requests.Session.get", return_value=Response()):
+            result = fetch_vmall_sources(PRODUCT, "https://m.vmall.com/product/123456.html")
+        self.assertEqual(result[0]["official_url"], URL)
+
+    def test_current_shop_link_still_rejects_tracking_parameters(self):
+        with self.assertRaisesRegex(VmallError, "跟踪参数"):
+            fetch_vmall_sources(PRODUCT, 'https://item.vmall.com/product/comdetail/index.html'
+                                        '?prdId=123456&sign=private')
+        with self.assertRaisesRegex(VmallError, "跟踪参数"):
+            fetch_vmall_sources(PRODUCT, 'https://item.vmall.com/product/comdetail/index.html?prdId=123456&from=share')
+
+    def test_current_shop_redirect_warms_up_once_then_reads_product(self):
+        redirect = Response(status=302, headers={
+            "Location": "https://item.vmall.com/product/comdetail/index.html?prdId=123456&sbomCode=1"})
+        warm = Response("<html><body>home</body></html>")
+        body = ('<html><head><title>' + PRODUCT + '</title></head><body><script>'
+                '{"parameterData":{"list":{"data":[{"name":"主要参数","data":['
+                '{"attrName":"操作系统","attrValue":"Windows 11 家庭中文版"}]}]}}}</script></body></html>')
+        with patch("vmall_client.requests.Session.get",
+                   side_effect=[redirect, warm, Response(body)]) as get:
+            result = fetch_vmall_sources(PRODUCT, URL)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(result[0]["official_url"], URL)
+
+
 if __name__ == "__main__":
     unittest.main()

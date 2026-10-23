@@ -151,7 +151,46 @@ class AgentRegressionTests(unittest.TestCase):
         self.assertIsNone(result.get("export_markdown"))
         self.assertIsNone(result.get("export_json"))
 
-    def test_truncated_png_is_rejected_before_any_model_call(self):
+    def test_catalog_miss_without_mall_link_asks_for_explicit_page(self):
+        with patch("agent.get_products", return_value=[PRODUCT]), patch("agent.fetch_vmall_sources", return_value=[]):
+            result = agent.run_task(product="HUAWEI Mate 70 Pro", audience="职场新人", scenario="职场办公",
+                                    platform="门店朋友圈", goal="种草了解")
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertIn("华为商城", result["report"])
+        self.assertEqual(self.ima.retrieve_calls, [])
+        self.assertEqual(self.phases(), [])
+
+    def test_mall_only_product_outside_catalog_yields_text_only_draft(self):
+        mall = {"title": "HUAWEI Mate 70 Pro",
+                "text": "HUAWEI Mate 70 Pro\n【主要参数】操作系统：HarmonyOS 4.3；" + QUOTE,
+                "kind": "facts", "official_url": "https://www.vmall.com/product/123456.html",
+                "retrieved_at": "2026-10-23T05:00:00+00:00", "origin": "official_vmall"}
+        with patch("agent.get_products", return_value=[PRODUCT, OTHER]), \
+                patch("agent.fetch_vmall_sources", return_value=[mall]):
+            result = agent.run_task(product="HUAWEI Mate 70 Pro", audience="职场新人", scenario="职场办公",
+                                    platform="门店朋友圈", goal="种草了解",
+                                    requirements="https://www.vmall.com/product/123456.html")
+        self.assertEqual(result["status"], "ready", result.get("report"))
+        self.assertTrue(result["checks"].get("vmall_only"))
+        self.assertEqual(result["images"], [])
+        self.assertFalse(result["checks"]["platform_ready"], "没有授权配图时必须按草稿交付")
+        self.assertIn("草稿", result["checks"]["publication"])
+        self.assertTrue(result["copy_text"])
+        self.assertEqual(self.ima.retrieve_calls, [], "知识库外产品不应检索 ima 目录")
+        self.assertEqual(self.phases(), ["extract", "fact_review", "compose", "audit"])
+        self.assertIn("华为官方商城", result["report"])
+
+    def test_mall_product_identity_mismatch_asks_before_model(self):
+        from vmall_client import VmallError
+        with patch("agent.get_products", return_value=[PRODUCT]), \
+                patch("agent.fetch_vmall_sources", side_effect=VmallError("商城当前商品为「HUAWEI Mate 70」，与填写的型号不一致。")):
+            result = agent.run_task(product="HUAWEI Mate 60 Pro", audience="职场新人", scenario="职场办公",
+                                    platform="门店朋友圈", goal="种草了解",
+                                    requirements="https://www.vmall.com/product/123456.html")
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertIn("华为官方商城", result["report"])
+        self.assertEqual(self.phases(), [])
+
         self.picture.write_bytes(self.picture.read_bytes()[:40])
         result = self.run_task()
         self.assert_not_published(result, "needs_clarification")

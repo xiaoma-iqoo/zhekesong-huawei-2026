@@ -182,33 +182,51 @@ def _product_intents(text, options):
     return intents
 
 
-def generate_now(current, product, audience, platform, pending_message='', api_config=None) -> dict:
+def _mall_link(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ''
+    if len(text) > 500:
+        raise SimpleModeError('华为商城链接过长，请检查后重试。')
+    return text
+
+
+def generate_now(current, product, audience, platform, pending_message='', api_config=None, mall_url='') -> dict:
     basic = _basic(product, audience, platform, api_config)
     _require_api(api_config)
     history = _session_history(current, basic)
     history = _append_message(history, pending_message, api_config)
     history = _public(history, api_config)
+    mall_url = _mall_link(mall_url)
+    mall_note = ('\n华为商城商品页：' + mall_url) if mall_url else ''
     users = '\n'.join(x['content'] for x in history if x['role'] == 'user')
     try:
         products = agent.get_products()
     except Exception:
-        raise SimpleModeError('暂时无法读取产品目录，请检查资料连接后重试。') from None
-    match = resolve_product(basic['product'], products)
+        products = []
+    match = resolve_product(basic['product'], products) if products else {
+        'status': 'unknown', 'product': None, 'candidates': [],
+        'message': '暂时没有可用的产品目录，无法确认型号。'}
     canonical = match['product'] if match['status'] == 'matched' else None
-    intents = _product_intents(users, products)
-    matches = [name for name, selected in intents.items() if selected]
-    if canonical and (intents.get(canonical) is False or any(name != canonical for name in matches)):
-        raise SimpleModeError('三项基础需求中的产品与对话型号冲突，请在产品字段修改或重新选定型号后重新开始引导。')
     if canonical:
+        intents = _product_intents(users, products)
+        matches = [name for name, selected in intents.items() if selected]
+        if intents.get(canonical) is False or any(name != canonical for name in matches):
+            raise SimpleModeError('三项基础需求中的产品与对话型号冲突，请在产品字段修改或重新选定型号后重新开始引导。')
         # Comparing or discussing a second catalog model makes the brief product
         # ambiguous; ask the user to settle the model field instead of guessing.
         others = [name for name in intents if name != canonical]
         if others:
             raise SimpleModeError('三项基础需求中的产品与对话型号冲突：对话出现了其他型号，请确认唯一产品字段后重新开始引导。')
     if not canonical:
-        canonical = matches[0] if len(matches) == 1 else None
-    if not canonical:
-        raise SimpleModeError(match['message'] + ' 不会从泛称自动挑选型号。')
+        if mall_url:
+            # 知识库外产品：保留用户填写的型号，由 agent 用华为商城商品页标题核验身份。
+            canonical = basic['product'].strip()
+        else:
+            matches = [name for name, selected in _product_intents(users, products).items() if selected]
+            canonical = matches[0] if len(matches) == 1 else None
+        if not canonical:
+            raise SimpleModeError(match['message'] + ' 若这是知识库之外的产品，请填写「华为商城商品链接」；不会从泛称自动挑选型号。')
     scenes = _explicit_mentions(users, SCENE_RULES)
     goals = _explicit_mentions(users, GOALS)
     scene = scenes[-1] if scenes else None
@@ -216,13 +234,15 @@ def generate_now(current, product, audience, platform, pending_message='', api_c
     try:
         result = agent.run_task(product=canonical, audience=basic['audience'], platform=basic['platform'],
                                 scenario=scene or '职场办公', goal=goal or '种草了解',
-                                requirements=users + '\n未提供细节时用中性表述；不虚构体验、价格、门店或促销。',
+                                requirements=users + mall_note + '\n未提供细节时用中性表述；不虚构体验、价格、门店或促销。',
                                 phase='final', style_card=get_preset('亲切自然'), api_config=api_config)
     except Exception:
         raise SimpleModeError('生成暂时不可用，请检查模型 API 或资料连接后重试；未交付可发布文案。') from None
     out = _output(basic, history, result)
     out['summary'] += '\n' + (f'场景：{scene}' if scene else '默认场景：职场办公')
     out['summary'] += '；' + (f'目标：{goal}' if goal else '默认目标：种草了解')
+    if mall_url:
+        out['summary'] += '；华为商城商品页：' + mall_url
     if not users:
         out['summary'] += '；未提供额外偏好。'
     return out
