@@ -484,7 +484,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
             if not canonical:
                 # 知识库之外的产品：只允许用户明确提供的华为商城商品页作为事实来源；
                 # 同页的主商品官方配图可一并读取（用户明确允许从华为商城获取图片）。
-                assets = fetch_vmall_product(product, source_requests, image_dir=ARCHIVE_IMAGE_ROOT)
+                assets = fetch_vmall_product(product, source_requests, image_dir=ARCHIVE_IMAGE_ROOT,
+                                             max_images=4, cache=True)
                 mall_sources, mall_images = assets["sources"], assets["images"]
                 if not mall_sources:
                     detail = "\n".join("- " + q for q in questions) if questions else "- 请先确认产品型号。"
@@ -539,7 +540,8 @@ def run_task(product: str, audience: str, scenario: str, platform: str, goal: st
                 mode_label = {"live_ima": "实时 ima", "ima_cache": "ima 已检索缓存",
                               "offline_archive": "主办方 ZIP 缓存（非实时 ima）", "mixed": "ima 检索与缓存混合"}[mode]
                 sources = [s.copy() for s in result.get("sources", []) if s.get("text")]
-                marketplace = fetch_vmall_product(product, source_requests, image_dir=ARCHIVE_IMAGE_ROOT)
+                marketplace = fetch_vmall_product(product, source_requests, image_dir=ARCHIVE_IMAGE_ROOT,
+                                                  max_images=4, cache=True)
                 mall_sources = marketplace["sources"]
                 mall_images = marketplace["images"]
                 used_source_ids = {s["id"] for s in sources}

@@ -182,7 +182,7 @@ def build_simple(api_state, fallback_products, ima_state=None):
         text = '会话模型配置已清空，生成前请重新配置。'
         return {**clear_result(), api_state:{}, api_base:'', api_key:'', api_model:'', api_notice:text, notice:text}
 
-    def simple_match_product(text, ima=None):
+    def simple_match_product(text, mall_url='', ima=None):
         """手输型号自动匹配目录：命中就回填准确型号，命中不了给出候选提示。"""
         import agent
         from policy import resolve_product
@@ -194,6 +194,9 @@ def build_simple(api_state, fallback_products, ima_state=None):
         result = resolve_product(text, products or fallback_products)
         if result['status'] == 'matched':
             return gr.update(value=result['product']), '✓ ' + result['message']
+        if str(mall_url or '').strip():
+            return gr.update(), ('已填写华为商城链接：生成时将按该链接读取商品参数与同型号配图；'
+                                 '请确认型号与商城标题一致（年份/系统/款式不一致会被停止）。')
         return gr.update(), result['message']
 
     event = dict(outputs=outputs, api_visibility='private', concurrency_limit=1,
@@ -205,8 +208,10 @@ def build_simple(api_state, fallback_products, ima_state=None):
     confirm.click(simple_confirm, inputs=[delivery, state, product, audience, platform, message], **event)
     for component in (product, audience, platform):
         component.input(simple_invalidate_basics, inputs=[], **{**event, 'trigger_mode':'always_last'})
-    product.blur(simple_match_product, inputs=[product, *ima_input], outputs=[product, product_hint],
+    product.blur(simple_match_product, inputs=[product, mall, *ima_input], outputs=[product, product_hint],
                  api_visibility='private', queue=False)
+    mall.blur(simple_match_product, inputs=[product, mall, *ima_input], outputs=[product, product_hint],
+              api_visibility='private', queue=False)
     message.input(simple_invalidate_draft, inputs=[], **{**event, 'trigger_mode':'always_last'})
     mall.input(simple_invalidate_draft, inputs=[], **{**event, 'trigger_mode':'always_last'})
     api_outputs = [api_state, api_base, api_key, api_model, api_notice, *outputs]

@@ -91,6 +91,28 @@ class VmallTests(unittest.TestCase):
             assets = fetch_vmall_product(PRODUCT, URL, image_dir=tmp)
         self.assertEqual(assets["images"], [])
 
+    def test_recent_successful_read_is_cached_when_requested(self):
+        import vmall_client
+        vmall_client._ASSET_CACHE.clear()
+        gallery = ('"groupPhotoList":[{"maxSize":3680,"photoName":"A.png","photoPath":"/p/"}],'
+                   '"webpGroupPhotoList":[]')
+        product_page = page().replace("</script>", "</script>" + gallery)
+        calls = []
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            if "res.vmallres.com" in url:
+                return Response("fake-image-bytes", headers={"Content-Type": "image/png"})
+            return Response(product_page, headers={"Content-Type": "text/html; charset=utf-8"})
+
+        with tempfile.TemporaryDirectory() as tmp, patch("vmall_client.requests.Session.get", side_effect=fake_get):
+            first = fetch_vmall_product(PRODUCT, URL, image_dir=tmp, cache=True)
+            second = fetch_vmall_product(PRODUCT, URL, image_dir=tmp, cache=True)
+        self.assertEqual(len(second["images"]), len(first["images"]))
+        product_requests = [u for u in calls if "res.vmallres.com" not in u]
+        self.assertEqual(len(product_requests), 1, "15 分钟内的重复读取应命中缓存")
+        self.assertEqual(second["sources"][0]["title"], first["sources"][0]["title"])
+
     def test_no_explicit_mall_link_never_searches_or_guesses(self):
         self.assertEqual(fetch_vmall_sources(PRODUCT, "请补充官方商城参数。"), [])
         self.assertEqual(fetch_vmall_sources(PRODUCT, "https://consumer.huawei.com/"), [])

@@ -19,6 +19,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import time
 import unicodedata
 from urllib.parse import parse_qsl, urljoin, urlsplit
 
@@ -400,6 +401,8 @@ def fetch_vmall_sources(product: str, text: str, *, timeout=20, max_sources=2) -
 
 _IMAGE_MAX = 6
 _IMAGE_BYTES = 6 * 1024 * 1024
+_ASSET_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_ASSET_TTL = 900
 _IMAGE_HOST_SUFFIX = ".vmallres.com"
 _IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp")
 _GROUP_PHOTO = re.compile(r'\{"maxSize":\d+,"photoName":"([^"]+)","photoPath":"([^"]+)"\}')
@@ -461,17 +464,27 @@ def _download_image(session, url: str, dest_dir: Path, timeout: float) -> str:
 
 
 def fetch_vmall_product(product: str, text: str, *, image_dir=None, timeout=20, max_sources=2,
-                         max_images=_IMAGE_MAX) -> dict:
+                         max_images=_IMAGE_MAX, cache=False) -> dict:
     """Fetch the explicit VMall product page: official text facts plus product photos.
 
     ``image_dir`` enables downloading the same-product gallery photos (official
     marketing photos) into a local cache so preview/download can serve them.
+    ``cache`` reuses a recent successful read (15 minutes) to keep repeated
+    demo generations fast; images are re-checked for existence.
     """
     links = _product_ids(text)
     limit = max(0, min(int(max_sources), 2))
     if not links or not limit:
         return {"sources": [], "images": []}
     timeout = max(1.0, min(float(timeout), 40.0))
+    cache_key = (str(product).strip().casefold(), links[0][0]) if (cache and len(links) == 1) else None
+    if cache_key:
+        entry = _ASSET_CACHE.get(cache_key)
+        if entry and time.time() - entry[0] < _ASSET_TTL:
+            cached = entry[1]
+            if all(Path(image["path"]).is_file() for image in cached["images"]):
+                return {"sources": [dict(source) for source in cached["sources"]],
+                        "images": [dict(image) for image in cached["images"]]}
     sources, images = [], []
     # A fresh isolated session neither reads netrc/proxy credentials nor reuses app
     # auth/cookies. Requests are fixed to validated public hosts and manual redirects.
@@ -498,4 +511,6 @@ def fetch_vmall_product(product: str, text: str, *, image_dir=None, timeout=20, 
                                    "path": path, "origin": "official_vmall",
                                    "source": "华为官方商城商品页", "source_title": "华为官方商城商品页",
                                    "url": image_url, "official_url": final_url, "retrieved_at": retrieved_at})
+    if cache_key:
+        _ASSET_CACHE[cache_key] = (time.time(), {"sources": sources, "images": images})
     return {"sources": sources, "images": images}
